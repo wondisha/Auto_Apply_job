@@ -2,6 +2,16 @@
 
 Automates job-application prep and browser submission with local fallback LLM support.
 
+## What's New
+
+- Automatic LinkedIn job discovery from a search query
+- Ranked preview mode with `--discover-only`
+- Improved LinkedIn guest result extraction and ranking flow
+- Better local-model runtime controls for timeout, thinking, and vision behavior
+- Optional interview-prep-only generation and skip-doc-generation apply mode
+
+See [CHANGELOG.md](CHANGELOG.md) for release details.
+
 The project is designed for a single candidate workflow:
 
 - validate a real job posting URL
