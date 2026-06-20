@@ -1,0 +1,22 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local candidate materials
+*.pdf
+!README-assets/*.pdf
+wondi.pdf
+
+# Local runtime state
+.agent_status.json
+.application_history.json
+browser_profile/
+artifacts/
+
+# Local working files
+jobs.txt
+ollama-install.ps1
