@@ -215,6 +215,169 @@ def get_verified_company_allowlist():
     return {entry.strip().lower() for entry in allowlist.split(",") if entry.strip()}
 
 
+def get_candidate_profile():
+    return {
+        "first_name": "Wondi",
+        "last_name": "Wolde",
+        "email": "wondenad@gmail.com",
+        "phone": "240-505-7107",
+        "linkedin_url": "https://linkedin.com/in/wondi",
+        "github_url": "https://github.com/wondisha",
+        "location": "Garland, Texas",
+        "sponsorship_needed": "No",
+    }
+
+
+def split_csv_env(name, fallback=""):
+    raw_value = os.getenv(name, fallback)
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def get_preferred_role_keywords():
+    return split_csv_env(
+        "PREFERRED_ROLE_KEYWORDS",
+        "snowflake,data engineer,database administrator,data platform,cloud data operations,sql server",
+    )
+
+
+def get_preferred_location_keywords(candidate_profile):
+    return split_csv_env(
+        "PREFERRED_LOCATION_KEYWORDS",
+        f"{candidate_profile['location']},Dallas,Texas,Remote,Hybrid",
+    )
+
+
+def normalize_text(value):
+    return re.sub(r"\s+", " ", value.lower()).strip()
+
+
+def count_keyword_hits(text, keywords):
+    normalized = normalize_text(text)
+    hits = []
+    for keyword in keywords:
+        lowered = normalize_text(keyword)
+        if lowered and lowered in normalized:
+            hits.append(keyword)
+    return hits
+
+
+def extract_resume_keywords(resume_text):
+    candidate_terms = re.findall(r"[a-zA-Z][a-zA-Z0-9\+#\.\-/]{2,}", resume_text.lower())
+    stopwords = {
+        "with", "from", "that", "this", "have", "your", "will", "team", "role", "years", "using",
+        "into", "such", "than", "their", "about", "work", "data", "engineer", "manager", "senior",
+    }
+    ranked_terms = []
+    seen = set()
+    for term in candidate_terms:
+        if term in stopwords or term in seen:
+            continue
+        seen.add(term)
+        ranked_terms.append(term)
+        if len(ranked_terms) >= 40:
+            break
+    return ranked_terms
+
+
+def score_job_context(job_context, resume_text, candidate_profile):
+    combined_text = "\n".join(
+        [job_context["page_title"], job_context["job_title"], job_context["description"], job_context["page_text"][:3000]]
+    )
+    score = 0
+    reasons = []
+
+    role_hits = count_keyword_hits(combined_text, get_preferred_role_keywords())
+    if role_hits:
+        score += 25 * len(role_hits)
+        reasons.append(f"role matches: {', '.join(role_hits[:4])}")
+
+    location_hits = count_keyword_hits(combined_text, get_preferred_location_keywords(candidate_profile))
+    if location_hits:
+        score += 12 * len(location_hits)
+        reasons.append(f"location matches: {', '.join(location_hits[:3])}")
+
+    resume_hits = count_keyword_hits(combined_text, extract_resume_keywords(resume_text))
+    if resume_hits:
+        score += min(len(resume_hits), 10) * 4
+        reasons.append(f"resume overlap: {', '.join(resume_hits[:5])}")
+
+    eligibility_markers = (
+        "green card",
+        "u.s. citizens",
+        "citizens only",
+        "no sponsorship",
+        "no opt",
+    )
+    eligibility_hits = count_keyword_hits(combined_text, list(eligibility_markers))
+    if candidate_profile["sponsorship_needed"].strip().lower() == "no" and eligibility_hits:
+        score += 10
+        reasons.append("eligibility aligned")
+
+    if job_context.get("verified"):
+        score += 30
+        reasons.append(f"verified via {job_context.get('verification_source')}")
+
+    return score, reasons
+
+
+def rank_job_urls(job_urls, resume_path, candidate_profile):
+    resume_text = extract_resume_text(Path(resume_path).expanduser())
+    ranked_jobs = []
+
+    for job_url in job_urls:
+        try:
+            job_context = fetch_job_posting_context(job_url)
+            verified, verification_source = classify_company_verification(job_context)
+            job_context["verified"] = verified
+            job_context["verification_source"] = verification_source
+
+            if require_verified_company() and not verified:
+                ranked_jobs.append(
+                    {
+                        "url": job_url,
+                        "job_context": job_context,
+                        "eligible": False,
+                        "score": -1,
+                        "reasons": ["company verification not confirmed"],
+                    }
+                )
+                continue
+
+            score, reasons = score_job_context(job_context, resume_text, candidate_profile)
+            ranked_jobs.append(
+                {
+                    "url": job_url,
+                    "job_context": job_context,
+                    "eligible": True,
+                    "score": score,
+                    "reasons": reasons,
+                }
+            )
+        except Exception as exc:
+            ranked_jobs.append(
+                {
+                    "url": job_url,
+                    "job_context": {"url": job_url, "company_name": "Unknown Company", "job_title": job_url},
+                    "eligible": False,
+                    "score": -1,
+                    "reasons": [f"screening error: {exc}"],
+                }
+            )
+
+    ranked_jobs.sort(key=lambda item: (item["eligible"], item["score"]), reverse=True)
+    return ranked_jobs
+
+
+def print_ranked_job_summary(ranked_jobs, selection_count):
+    print(f"[*] Ranked {len(ranked_jobs)} jobs. Selecting top {selection_count} verified postings.")
+    for index, item in enumerate(ranked_jobs[:selection_count], start=1):
+        context = item["job_context"]
+        reason_text = "; ".join(item["reasons"][:3]) if item["reasons"] else "no scoring reasons"
+        print(
+            f"[{index}] score={item['score']} | {context.get('company_name')} | {context.get('job_title')} | {reason_text}"
+        )
+
+
 def validate_ollama_runtime(model):
     try:
         ollama_executable = resolve_ollama_executable()
@@ -713,16 +876,7 @@ def prepare_application_package(job_url, resume_path, candidate_profile):
 
 
 async def run_application_agent(job_url, resume_path):
-    candidate_profile = {
-        "first_name": "Wondi",
-        "last_name": "Wolde",
-        "email": "wondenad@gmail.com",
-        "phone": "240-505-7107",
-        "linkedin_url": "https://linkedin.com/in/wondi",
-        "github_url": "https://github.com/wondisha",
-        "location": "Garland, Texas",
-        "sponsorship_needed": "No",
-    }
+    candidate_profile = get_candidate_profile()
 
     run_startup_preflight(job_url, resume_path)
     package = prepare_application_package(job_url, resume_path, candidate_profile)
@@ -881,16 +1035,7 @@ def load_job_urls(job_url, job_urls_file):
 
 
 def generate_docs_only(job_url, resume_path):
-    candidate_profile = {
-        "first_name": "Wondi",
-        "last_name": "Wolde",
-        "email": "wondenad@gmail.com",
-        "phone": "240-505-7107",
-        "linkedin_url": "https://linkedin.com/in/wondi",
-        "github_url": "https://github.com/wondisha",
-        "location": "Garland, Texas",
-        "sponsorship_needed": "No",
-    }
+    candidate_profile = get_candidate_profile()
     package = prepare_application_package(job_url, resume_path, candidate_profile)
     if not package["should_apply"]:
         raise ValueError(package["reason"])
@@ -918,16 +1063,46 @@ async def run_job_plan(job_urls, resume_path, docs_only=False):
 
     target = get_daily_application_target()
     starting_successes = count_successful_applications_today()
+    remaining_target = max(target - starting_successes, 0)
     print(f"[*] Starting batch run with {len(job_urls)} URLs. Daily target: {target}")
 
     if starting_successes >= target:
         print("[*] Daily target already met. No new applications will be submitted.")
         return True
 
-    for job_url in job_urls:
+    candidate_profile = get_candidate_profile()
+    ranked_jobs = rank_job_urls(job_urls, resume_path, candidate_profile)
+    eligible_ranked_jobs = [item for item in ranked_jobs if item["eligible"]]
+
+    if not eligible_ranked_jobs:
+        print("[!] No verified jobs qualified for application after screening.")
+        for item in ranked_jobs:
+            context = item["job_context"]
+            record_application_event(
+                context,
+                "skipped",
+                reason="; ".join(item["reasons"]) or "job did not qualify during ranking",
+                artifacts={},
+            )
+        return False
+
+    selected_jobs = eligible_ranked_jobs[:remaining_target]
+    print_ranked_job_summary(selected_jobs, len(selected_jobs))
+
+    skipped_jobs = [item for item in ranked_jobs if item not in selected_jobs]
+    for item in skipped_jobs:
+        context = item["job_context"]
+        record_application_event(
+            context,
+            "skipped",
+            reason="; ".join(item["reasons"]) or "not selected in top-ranked jobs",
+            artifacts={},
+        )
+
+    for item in selected_jobs:
         if count_successful_applications_today() >= target:
             break
-        await run_application_agent(job_url, resume_path)
+        await run_application_agent(item["url"], resume_path)
 
     final_successes = count_successful_applications_today()
     print(f"[*] Batch complete. Daily verified applications: {final_successes}/{target}")

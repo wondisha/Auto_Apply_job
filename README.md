@@ -17,6 +17,7 @@ The project is designed for a single candidate workflow:
 - Native `browser_use.Agent` fallback LLM support
 - Local Ollama fallback using `qwen2.5:3b`
 - Verified-company policy with allowlist override
+- Ranking verified jobs and selecting the top 5 by fit
 - Batch processing from a job URL list file
 - Per-job artifacts:
   - `job_context.json`
@@ -89,6 +90,13 @@ Apply in batch from a file:
 python .\apply_agent.py --job-urls-file ".\jobs.txt" --resume "wondi.pdf"
 ```
 
+In batch mode, the script now:
+
+- screens every URL first
+- filters out non-verified postings when verified-only mode is on
+- scores verified postings against preferred roles, locations, and resume overlap
+- selects only the highest-ranked jobs up to `DAILY_APPLICATION_TARGET`
+
 ## Verified-company policy
 
 The script defaults to `REQUIRE_VERIFIED_COMPANY=1`.
@@ -105,6 +113,22 @@ This is intentionally conservative. On many LinkedIn guest pages, the allowlist 
 - `DAILY_APPLICATION_TARGET` defaults to `5`
 - successful applications are tracked in `.application_history.json`
 - batch mode stops once the daily target is met
+- batch mode ranks verified jobs first and applies only to the top-scoring set
+
+## Ranking behavior
+
+The ranking step is deterministic and currently uses:
+
+- preferred role keywords from `PREFERRED_ROLE_KEYWORDS`
+- preferred location keywords from `PREFERRED_LOCATION_KEYWORDS`
+- overlap between the posting text and extracted resume keywords
+- eligibility wording such as `green card` or `no sponsorship`
+- verification status
+
+If you want better ranking for your search, tune these two settings in `.env`:
+
+- `PREFERRED_ROLE_KEYWORDS`
+- `PREFERRED_LOCATION_KEYWORDS`
 
 ## Generated artifacts
 
@@ -126,6 +150,7 @@ Typical files:
 - `.env`, local resumes, artifacts, and runtime state are ignored by git.
 - If `weasyprint` is not importable in the active Python environment, the script falls back to the original PDF for upload and still writes tailored HTML.
 - Small local Ollama models can be slow; `DOCUMENT_RESUME_CHAR_LIMIT`, `DOCUMENT_JOB_CHAR_LIMIT`, and `DOCUMENT_MAX_TOKENS` exist to keep local generation bounded.
+- LinkedIn guest pages often do not expose a strong verification badge in HTML, so `VERIFIED_COMPANY_ALLOWLIST` is still the most reliable way to approve trusted employers.
 
 ## Next operational file
 

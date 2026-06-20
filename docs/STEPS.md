@@ -36,6 +36,7 @@ C:\Users\techp\AppData\Local\Programs\Ollama\ollama.exe --version
 3. Keep `FALLBACK_LLM_PROVIDER=ollama` and `FALLBACK_LLM_MODEL=qwen2.5:3b` for free local fallback.
 4. Set `RESUME_PATH` to your real resume PDF.
 5. Add trusted companies to `VERIFIED_COMPANY_ALLOWLIST`.
+6. Tune `PREFERRED_ROLE_KEYWORDS` and `PREFERRED_LOCATION_KEYWORDS` so the top-5 selector matches the jobs you actually want.
 
 ## 4. Create the job list
 
@@ -77,6 +78,8 @@ python .\apply_agent.py --job-urls-file ".\jobs.txt" --resume "wondi.pdf"
 Behavior:
 
 - skips companies that fail verification
+- ranks verified jobs before applying
+- selects only the top jobs up to the daily target
 - prepares per-job docs before applying
 - uploads tailored PDF when available, otherwise the original PDF
 - stops once `DAILY_APPLICATION_TARGET` is reached
