@@ -7,9 +7,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -26,6 +27,7 @@ VERIFIED_MARKERS = (
     "linkedin verified",
     "verified hiring",
 )
+SUPPORTED_SEARCH_PORTALS = {"linkedin"}
 
 
 def resolve_ollama_executable():
@@ -92,6 +94,12 @@ def resolve_browser_profile_dir():
 
 
 def create_primary_llm():
+    if os.getenv("USE_FALLBACK_AS_PRIMARY", "0").strip().lower() in {"1", "true", "yes"}:
+        fallback_llm = create_fallback_llm()
+        if fallback_llm is None:
+            raise ValueError("USE_FALLBACK_AS_PRIMARY is enabled, but no fallback LLM is configured.")
+        return fallback_llm
+
     return ChatGoogle(
         model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         max_retries=int(os.getenv("GEMINI_MAX_RETRIES", "2")),
@@ -162,6 +170,56 @@ def create_fallback_llm():
     raise ValueError(
         f"Unsupported FALLBACK_LLM_PROVIDER '{provider}'. Supported values: google, openai, anthropic, groq, litellm, ollama."
     )
+
+
+def get_fallback_provider_name():
+    return os.getenv("FALLBACK_LLM_PROVIDER", os.getenv("FALLBACK_PROVIDER", "google")).strip().lower()
+
+
+def get_agent_llm_timeout_seconds():
+    configured = os.getenv("AGENT_LLM_TIMEOUT", "180").strip() or "180"
+    try:
+        timeout = int(configured)
+    except ValueError as exc:
+        raise ValueError(f"AGENT_LLM_TIMEOUT must be an integer. Got: {configured}") from exc
+
+    if timeout <= 0:
+        raise ValueError("AGENT_LLM_TIMEOUT must be greater than zero.")
+
+    return timeout
+
+
+def get_agent_step_timeout_seconds():
+    configured = os.getenv("AGENT_STEP_TIMEOUT", "240").strip() or "240"
+    try:
+        timeout = int(configured)
+    except ValueError as exc:
+        raise ValueError(f"AGENT_STEP_TIMEOUT must be an integer. Got: {configured}") from exc
+
+    if timeout <= 0:
+        raise ValueError("AGENT_STEP_TIMEOUT must be greater than zero.")
+
+    return timeout
+
+
+def should_use_agent_thinking():
+    configured = os.getenv("AGENT_USE_THINKING", "").strip().lower()
+    if configured:
+        return configured not in {"0", "false", "no"}
+
+    return get_fallback_provider_name() != "ollama"
+
+
+def should_use_agent_vision():
+    configured = os.getenv("AGENT_USE_VISION", "").strip().lower()
+    if configured:
+        return configured not in {"0", "false", "no"}
+
+    provider = get_fallback_provider_name()
+    if provider == "ollama":
+        return False
+
+    return True
 
 
 def read_json_file(path, default_value):
@@ -318,6 +376,111 @@ def score_job_context(job_context, resume_text, candidate_profile):
         reasons.append(f"verified via {job_context.get('verification_source')}")
 
     return score, reasons
+
+
+def get_search_result_limit():
+    configured = os.getenv("JOB_SEARCH_RESULT_LIMIT", "25").strip() or "25"
+    try:
+        limit = int(configured)
+    except ValueError as exc:
+        raise ValueError(f"JOB_SEARCH_RESULT_LIMIT must be an integer. Got: {configured}") from exc
+
+    if limit <= 0:
+        raise ValueError("JOB_SEARCH_RESULT_LIMIT must be greater than zero.")
+
+    return limit
+
+
+def build_linkedin_search_url(search_query, search_location, start=0):
+    keyword_value = quote_plus(search_query.strip())
+    location_value = quote_plus(search_location.strip()) if search_location.strip() else ""
+    url = f"https://www.linkedin.com/jobs/search/?keywords={keyword_value}"
+    if location_value:
+        url += f"&location={location_value}"
+    if start > 0:
+        url += f"&start={start}"
+    return url
+
+
+def build_linkedin_guest_search_url(search_query, search_location, start=0):
+    keyword_value = quote_plus(search_query.strip())
+    location_value = quote_plus(search_location.strip()) if search_location.strip() else ""
+    url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={keyword_value}"
+    if location_value:
+        url += f"&location={location_value}"
+    if start > 0:
+        url += f"&start={start}"
+    return url
+
+
+def extract_job_urls_from_search_html(html_text):
+    matches = re.findall(
+        r'https://www\.linkedin\.com/jobs/view/[^\"\'\s?]+|/jobs/view/[^\"\'\s?]+',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+    discovered = []
+    seen = set()
+    for match in matches:
+        normalized = match if match.startswith("http") else f"https://www.linkedin.com{match}"
+        normalized = normalized.split("?", 1)[0]
+        if normalized not in seen:
+            discovered.append(normalized)
+            seen.add(normalized)
+    return discovered
+
+
+def discover_linkedin_job_urls(search_query, search_location, max_results):
+    discovered = []
+    seen = set()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    page_size = 25
+    for start in range(0, max_results, page_size):
+        search_url = build_linkedin_guest_search_url(search_query, search_location, start=start)
+        response = requests.get(search_url, headers=headers, timeout=30)
+        response.raise_for_status()
+
+        page_urls = extract_job_urls_from_search_html(response.text)
+        if not page_urls:
+            break
+
+        new_on_page = 0
+        for url in page_urls:
+            if url in seen:
+                continue
+            discovered.append(url)
+            seen.add(url)
+            new_on_page += 1
+            if len(discovered) >= max_results:
+                return discovered
+
+        if new_on_page == 0:
+            break
+
+    return discovered
+
+
+def discover_job_urls(search_query, search_location, portal=None, max_results=None):
+    portal_name = (portal or os.getenv("JOB_SEARCH_PORTAL", "linkedin")).strip().lower()
+    if portal_name not in SUPPORTED_SEARCH_PORTALS:
+        supported = ", ".join(sorted(SUPPORTED_SEARCH_PORTALS))
+        raise ValueError(f"Unsupported job search portal '{portal_name}'. Supported values: {supported}")
+
+    if not search_query or not search_query.strip():
+        raise ValueError("Job search query is required for automatic discovery.")
+
+    result_limit = max_results or get_search_result_limit()
+    if portal_name == "linkedin":
+        job_urls = discover_linkedin_job_urls(search_query, search_location or "", result_limit)
+    else:
+        job_urls = []
+
+    if not job_urls:
+        location_text = f" in {search_location}" if search_location else ""
+        raise ValueError(f"No job postings were discovered for '{search_query}'{location_text} on {portal_name}.")
+
+    return job_urls
 
 
 def rank_job_urls(job_urls, resume_path, candidate_profile):
@@ -550,6 +713,10 @@ def get_document_max_tokens():
     return int(os.getenv("DOCUMENT_MAX_TOKENS", "450"))
 
 
+def should_generate_interview_prep_only():
+    return os.getenv("INTERVIEW_PREP_ONLY", "0").strip().lower() in {"1", "true", "yes"}
+
+
 def generate_ollama_text(prompt, model=None):
     model_name = model or get_document_model()
     host = (os.getenv("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
@@ -687,23 +854,24 @@ Source resume text:
 {resume_excerpt}
 """.strip()
 
-    resume_fragment = generate_ollama_text(resume_prompt, model=model_name)
-    tailored_resume_html = wrap_resume_html(
-        f"{job_context['company_name']} - {job_context['job_title']} Tailored Resume",
-        build_contact_html(candidate_profile),
-        resume_fragment,
-    )
     interview_prep_markdown = generate_ollama_text(interview_prompt, model=model_name)
-
-    artifact_paths["tailored_resume_html_path"].write_text(tailored_resume_html, encoding="utf-8")
     artifact_paths["interview_prep_path"].write_text(interview_prep_markdown, encoding="utf-8")
 
-    tailored_resume_pdf_path = render_resume_pdf_if_available(artifact_paths["tailored_resume_html_path"])
+    tailored_resume_pdf_path = None
+    if not should_generate_interview_prep_only():
+        resume_fragment = generate_ollama_text(resume_prompt, model=model_name)
+        tailored_resume_html = wrap_resume_html(
+            f"{job_context['company_name']} - {job_context['job_title']} Tailored Resume",
+            build_contact_html(candidate_profile),
+            resume_fragment,
+        )
+        artifact_paths["tailored_resume_html_path"].write_text(tailored_resume_html, encoding="utf-8")
+        tailored_resume_pdf_path = render_resume_pdf_if_available(artifact_paths["tailored_resume_html_path"])
 
     return {
         "artifact_dir": str(artifact_paths["artifact_dir"]),
         "job_context_path": str(artifact_paths["job_context_path"]),
-        "tailored_resume_html_path": str(artifact_paths["tailored_resume_html_path"]),
+        "tailored_resume_html_path": str(artifact_paths["tailored_resume_html_path"]) if artifact_paths["tailored_resume_html_path"].exists() else None,
         "tailored_resume_pdf_path": str(tailored_resume_pdf_path) if tailored_resume_pdf_path else None,
         "interview_prep_path": str(artifact_paths["interview_prep_path"]),
     }
@@ -772,6 +940,11 @@ def run_startup_preflight(job_url, resume_path):
     else:
         provider, model = fallback_config
         print(f"[*] Fallback LLM ready: {provider}/{model}")
+        print(
+            f"[*] Agent runtime settings: llm_timeout={get_agent_llm_timeout_seconds()}s, "
+            f"step_timeout={get_agent_step_timeout_seconds()}s, use_thinking={'on' if should_use_agent_thinking() else 'off'}, "
+            f"use_vision={'on' if should_use_agent_vision() else 'off'}"
+        )
 
     if verified:
         print(f"[*] Company verification accepted via {verification_source}")
@@ -846,6 +1019,10 @@ def build_agent_task(job_url, candidate_profile, upload_resume_path):
     )
 
 
+def should_skip_document_generation_for_apply():
+    return os.getenv("SKIP_DOCUMENT_GENERATION_ON_APPLY", "0").strip().lower() in {"1", "true", "yes"}
+
+
 def prepare_application_package(job_url, resume_path, candidate_profile):
     job_context = fetch_job_posting_context(job_url)
     verified, verification_source = classify_company_verification(job_context)
@@ -857,6 +1034,16 @@ def prepare_application_package(job_url, resume_path, candidate_profile):
             "job_context": job_context,
             "should_apply": False,
             "reason": "Company verification not confirmed.",
+            "artifacts": {},
+            "upload_resume_path": str(Path(resume_path).expanduser()),
+        }
+
+    if should_skip_document_generation_for_apply():
+        print("[!] Skipping tailored document generation for live apply. Using the original resume for upload.")
+        return {
+            "job_context": job_context,
+            "should_apply": True,
+            "reason": None,
             "artifacts": {},
             "upload_resume_path": str(Path(resume_path).expanduser()),
         }
@@ -907,9 +1094,24 @@ async def run_application_agent(job_url, resume_path):
 
         task = build_agent_task(job_url, candidate_profile, os.path.abspath(package["upload_resume_path"]))
         max_retries = int(os.getenv("AGENT_MAX_RETRIES", "3"))
+        llm_timeout = get_agent_llm_timeout_seconds()
+        step_timeout = get_agent_step_timeout_seconds()
+        use_thinking = should_use_agent_thinking()
+        use_vision = should_use_agent_vision()
 
         for attempt in range(max_retries):
-            agent = Agent(task=task, llm=llm, fallback_llm=fallback_llm, browser=browser)
+            agent = Agent(
+                task=task,
+                llm=llm,
+                fallback_llm=fallback_llm,
+                browser=browser,
+                llm_timeout=llm_timeout,
+                step_timeout=step_timeout,
+                use_thinking=use_thinking,
+                use_vision=use_vision,
+            )
+            if not hasattr(agent, "_task_start_time"):
+                agent._task_start_time = time.time()
             print(f"[*] Starting agent (Attempt {attempt + 1})")
 
             try:
@@ -1009,7 +1211,7 @@ async def smoke_test_browser():
             cleanup_browser(profile_path)
 
 
-def load_job_urls(job_url, job_urls_file):
+def load_job_urls(job_url, job_urls_file, job_search_query=None, job_search_location=None, job_search_portal=None):
     urls = []
     if job_url:
         urls.append(job_url)
@@ -1020,6 +1222,19 @@ def load_job_urls(job_url, job_urls_file):
             raise FileNotFoundError(f"Job URL list file not found: {job_urls_path}")
         file_urls = [line.strip() for line in job_urls_path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.strip().startswith("#")]
         urls.extend(file_urls)
+
+    if job_search_query:
+        discovered_urls = discover_job_urls(
+            job_search_query,
+            job_search_location,
+            portal=job_search_portal,
+            max_results=get_search_result_limit(),
+        )
+        print(
+            f"[*] Discovered {len(discovered_urls)} {job_search_portal or os.getenv('JOB_SEARCH_PORTAL', 'linkedin')} jobs for "
+            f"'{job_search_query}'{f' in {job_search_location}' if job_search_location else ''}."
+        )
+        urls.extend(discovered_urls)
 
     deduplicated = []
     seen = set()
@@ -1034,13 +1249,35 @@ def load_job_urls(job_url, job_urls_file):
     return deduplicated
 
 
+def preview_ranked_jobs(job_urls, resume_path):
+    candidate_profile = get_candidate_profile()
+    ranked_jobs = rank_job_urls(job_urls, resume_path, candidate_profile)
+    eligible_ranked_jobs = [item for item in ranked_jobs if item["eligible"]]
+    target_count = min(get_daily_application_target(), len(eligible_ranked_jobs))
+
+    if not eligible_ranked_jobs:
+        print("[!] No verified jobs qualified for application after screening.")
+        for item in ranked_jobs:
+            context = item["job_context"]
+            reason_text = "; ".join(item["reasons"][:3]) if item["reasons"] else "not eligible"
+            print(f"[-] {context.get('company_name')} | {context.get('job_title')} | {reason_text}")
+        return False
+
+    print_ranked_job_summary(eligible_ranked_jobs, target_count)
+    for index, item in enumerate(eligible_ranked_jobs[:target_count], start=1):
+        context = item["job_context"]
+        print(f"    -> {index}. {context.get('job_title')} at {context.get('company_name')} ({item['url']})")
+    return True
+
+
 def generate_docs_only(job_url, resume_path):
     candidate_profile = get_candidate_profile()
     package = prepare_application_package(job_url, resume_path, candidate_profile)
     if not package["should_apply"]:
         raise ValueError(package["reason"])
 
-    print(f"[*] Tailored resume HTML: {package['artifacts']['tailored_resume_html_path']}")
+    if package["artifacts"].get("tailored_resume_html_path"):
+        print(f"[*] Tailored resume HTML: {package['artifacts']['tailored_resume_html_path']}")
     if package["artifacts"].get("tailored_resume_pdf_path"):
         print(f"[*] Tailored resume PDF: {package['artifacts']['tailored_resume_pdf_path']}")
     print(f"[*] Interview prep doc: {package['artifacts']['interview_prep_path']}")
@@ -1124,6 +1361,14 @@ def parse_cli_args():
     parser = argparse.ArgumentParser(description="Run the browser-use job application agent.")
     parser.add_argument("--job-url", dest="job_url", help="Real application form URL to open.")
     parser.add_argument("--job-urls-file", dest="job_urls_file", help="Path to a text file with one job URL per line.")
+    parser.add_argument("--job-search-query", dest="job_search_query", help="Search job portals for matching roles before ranking.")
+    parser.add_argument("--job-search-location", dest="job_search_location", help="Optional location filter for automatic job discovery.")
+    parser.add_argument(
+        "--job-search-portal",
+        dest="job_search_portal",
+        default=os.getenv("JOB_SEARCH_PORTAL", "linkedin"),
+        help="Portal to search for jobs automatically. Currently supports: linkedin.",
+    )
     parser.add_argument("--resume", dest="resume_path", help="Path to the resume PDF to upload.")
     parser.add_argument(
         "--preflight",
@@ -1140,7 +1385,22 @@ def parse_cli_args():
         action="store_true",
         help="Generate the tailored resume/interview prep artifacts but do not submit applications.",
     )
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Discover and rank matching jobs but do not generate documents or submit applications.",
+    )
     return parser.parse_args()
+
+
+def has_explicit_job_input(args):
+    return any(
+        [
+            args.job_url,
+            args.job_urls_file,
+            args.job_search_query,
+        ]
+    )
 
 
 if __name__ == "__main__":
@@ -1150,8 +1410,17 @@ if __name__ == "__main__":
     my_tailored_pdf = args.resume_path or os.getenv("RESUME_PATH", "wondi.pdf")
 
     try:
-        job_urls = load_job_urls(args.job_url, args.job_urls_file)
-    except ValueError:
+        job_urls = load_job_urls(
+            args.job_url,
+            args.job_urls_file,
+            job_search_query=args.job_search_query,
+            job_search_location=args.job_search_location,
+            job_search_portal=args.job_search_portal,
+        )
+    except (FileNotFoundError, ValueError, requests.RequestException) as exc:
+        if has_explicit_job_input(args):
+            print(f"[!] Configuration error: {exc}")
+            raise SystemExit(1) from exc
         job_urls = [target_job_url]
 
     if args.preflight:
@@ -1167,6 +1436,15 @@ if __name__ == "__main__":
     if args.generate_docs_only:
         try:
             success = run_docs_plan(job_urls, my_tailored_pdf)
+        except (FileNotFoundError, ValueError, requests.RequestException) as exc:
+            print(f"[!] Configuration error: {exc}")
+            raise SystemExit(1) from exc
+
+        raise SystemExit(0 if success else 1)
+
+    if args.discover_only:
+        try:
+            success = preview_ranked_jobs(job_urls, my_tailored_pdf)
         except (FileNotFoundError, ValueError, requests.RequestException) as exc:
             print(f"[!] Configuration error: {exc}")
             raise SystemExit(1) from exc

@@ -38,7 +38,23 @@ C:\Users\techp\AppData\Local\Programs\Ollama\ollama.exe --version
 5. Add trusted companies to `VERIFIED_COMPANY_ALLOWLIST`.
 6. Tune `PREFERRED_ROLE_KEYWORDS` and `PREFERRED_LOCATION_KEYWORDS` so the top-5 selector matches the jobs you actually want.
 
-## 4. Create the job list
+## 4. Choose discovery mode or a manual job list
+
+Automatic discovery from LinkedIn:
+
+```powershell
+python .\apply_agent.py --discover-only --job-search-query "data engineer" --job-search-location "Texas" --resume "wondi.pdf"
+```
+
+This previews the highest-fit verified jobs without applying.
+
+If the preview looks good, run the same search without `--discover-only`:
+
+```powershell
+python .\apply_agent.py --job-search-query "data engineer" --job-search-location "Texas" --resume "wondi.pdf"
+```
+
+Manual list mode:
 
 Create `jobs.txt` with one URL per line.
 
@@ -77,6 +93,7 @@ python .\apply_agent.py --job-urls-file ".\jobs.txt" --resume "wondi.pdf"
 
 Behavior:
 
+- can discover LinkedIn jobs from a search query before ranking
 - skips companies that fail verification
 - ranks verified jobs before applying
 - selects only the top jobs up to the daily target

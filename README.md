@@ -17,6 +17,7 @@ The project is designed for a single candidate workflow:
 - Native `browser_use.Agent` fallback LLM support
 - Local Ollama fallback using `qwen2.5:3b`
 - Verified-company policy with allowlist override
+- Automatic LinkedIn job discovery from a search query
 - Ranking verified jobs and selecting the top 5 by fit
 - Batch processing from a job URL list file
 - Per-job artifacts:
@@ -90,9 +91,22 @@ Apply in batch from a file:
 python .\apply_agent.py --job-urls-file ".\jobs.txt" --resume "wondi.pdf"
 ```
 
+Discover matching jobs from LinkedIn and preview the best fits without applying:
+
+```powershell
+python .\apply_agent.py --discover-only --job-search-query "data engineer" --job-search-location "Texas" --resume "wondi.pdf"
+```
+
+Discover matching jobs from LinkedIn and feed them directly into the verified top-5 apply flow:
+
+```powershell
+python .\apply_agent.py --job-search-query "data engineer" --job-search-location "Texas" --resume "wondi.pdf"
+```
+
 In batch mode, the script now:
 
 - screens every URL first
+- can auto-discover LinkedIn job URLs from a search query
 - filters out non-verified postings when verified-only mode is on
 - scores verified postings against preferred roles, locations, and resume overlap
 - selects only the highest-ranked jobs up to `DAILY_APPLICATION_TARGET`
@@ -129,6 +143,11 @@ If you want better ranking for your search, tune these two settings in `.env`:
 
 - `PREFERRED_ROLE_KEYWORDS`
 - `PREFERRED_LOCATION_KEYWORDS`
+
+For automatic discovery, you can also tune:
+
+- `JOB_SEARCH_PORTAL` which currently supports `linkedin`
+- `JOB_SEARCH_RESULT_LIMIT` to cap how many public search results are screened before ranking
 
 ## Generated artifacts
 
