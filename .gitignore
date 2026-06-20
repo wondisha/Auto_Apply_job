@@ -14,6 +14,8 @@ wondi.pdf
 # Local runtime state
 .agent_status.json
 .application_history.json
+.application_data.sqlite3
+.question_memory.json
 browser_profile/
 artifacts/
 

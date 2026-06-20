@@ -7,6 +7,7 @@ Set-Location D:\Downloads\resume_control
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install browser-use python-dotenv requests pypdf langchain-google-genai
+pip install streamlit fastapi uvicorn
 ```
 
 Optional PDF generation support:
@@ -54,6 +55,22 @@ If the preview looks good, run the same search without `--discover-only`:
 python .\apply_agent.py --job-search-query "data engineer" --job-search-location "Texas" --resume "wondi.pdf"
 ```
 
+Optional app mode:
+
+```powershell
+streamlit run .\streamlit_app.py
+```
+
+The app shows recent applications, discovery preview, prep-pack generation, and reusable screening answers.
+
+Optional backend scaffold:
+
+```powershell
+uvicorn app_backend.main:app --reload
+```
+
+This starts the API scaffold for a fuller app architecture.
+
 Manual list mode:
 
 Create `jobs.txt` with one URL per line.
@@ -82,6 +99,8 @@ python .\apply_agent.py --generate-docs-only --job-url "https://www.linkedin.com
 This creates:
 
 - `job_context.json`
+- `gap_analysis.md`
+- `follow_up.md`
 - `tailored_resume.html`
 - `interview_prep.md`
 
@@ -98,6 +117,8 @@ Behavior:
 - ranks verified jobs before applying
 - selects only the top jobs up to the daily target
 - prepares per-job docs before applying
+- records structured events to a local SQLite store
+- saves reusable screening answers for future applications
 - uploads tailored PDF when available, otherwise the original PDF
 - stops once `DAILY_APPLICATION_TARGET` is reached
 
@@ -112,6 +133,8 @@ artifacts/YYYY-MM-DD/company-role/
 Daily application state is stored in:
 
 - `.application_history.json`
+- `.application_data.sqlite3`
+- `.question_memory.json`
 - `.agent_status.json`
 
 ## 9. Push this project to GitHub

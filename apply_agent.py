@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -20,6 +21,8 @@ load_dotenv()
 
 STATUS_FILE = Path(__file__).with_name(".agent_status.json")
 APPLICATION_LOG_FILE = Path(__file__).with_name(".application_history.json")
+APPLICATION_DB_FILE = Path(__file__).with_name(".application_data.sqlite3")
+QUESTION_MEMORY_FILE = Path(__file__).with_name(".question_memory.json")
 ARTIFACTS_ROOT = Path(__file__).with_name("artifacts")
 VERIFIED_MARKERS = (
     "verified company",
@@ -236,6 +239,118 @@ def write_json_file(path, payload):
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def get_db_connection():
+    connection = sqlite3.connect(APPLICATION_DB_FILE)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_application_store():
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS applications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                url TEXT,
+                company_name TEXT,
+                job_title TEXT,
+                verified INTEGER,
+                verification_source TEXT,
+                score INTEGER,
+                source TEXT,
+                artifacts_json TEXT NOT NULL,
+                gap_analysis_json TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS question_memory (
+                normalized_question TEXT PRIMARY KEY,
+                question_text TEXT NOT NULL,
+                answer_text TEXT NOT NULL,
+                source TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def normalize_question_text(question_text):
+    return re.sub(r"\s+", " ", (question_text or "").strip().lower())
+
+
+def load_question_memory():
+    file_memory = read_json_file(QUESTION_MEMORY_FILE, {"questions": []})
+    file_questions = file_memory.get("questions", [])
+    memory_by_question = {}
+    for entry in file_questions:
+        normalized = normalize_question_text(entry.get("question"))
+        if not normalized or not entry.get("answer"):
+            continue
+        memory_by_question[normalized] = {
+            "question": entry.get("question", "").strip(),
+            "answer": entry.get("answer", "").strip(),
+            "source": entry.get("source", "file"),
+            "updated_at": entry.get("updated_at", ""),
+        }
+
+    initialize_application_store()
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            "SELECT normalized_question, question_text, answer_text, source, updated_at FROM question_memory"
+        ).fetchall()
+    for row in rows:
+        memory_by_question[row["normalized_question"]] = {
+            "question": row["question_text"],
+            "answer": row["answer_text"],
+            "source": row["source"],
+            "updated_at": row["updated_at"],
+        }
+
+    return memory_by_question
+
+
+def save_question_memory(question_text, answer_text, source="manual"):
+    normalized = normalize_question_text(question_text)
+    if not normalized or not (answer_text or "").strip():
+        return
+
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    initialize_application_store()
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO question_memory (normalized_question, question_text, answer_text, source, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(normalized_question) DO UPDATE SET
+                question_text=excluded.question_text,
+                answer_text=excluded.answer_text,
+                source=excluded.source,
+                updated_at=excluded.updated_at
+            """,
+            (normalized, question_text.strip(), answer_text.strip(), source, timestamp),
+        )
+
+    memory = load_question_memory()
+    questions = sorted(memory.values(), key=lambda item: item["question"].lower())
+    write_json_file(QUESTION_MEMORY_FILE, {"questions": questions})
+
+
+def build_question_memory_context():
+    memory = load_question_memory()
+    if not memory:
+        return ""
+
+    lines = ["Known reusable screening answers:"]
+    for entry in sorted(memory.values(), key=lambda item: item["question"].lower()):
+        lines.append(f"- {entry['question']}: {entry['answer']}")
+    return "\n".join(lines)
+
+
 def load_status_record():
     return read_json_file(STATUS_FILE, {})
 
@@ -376,6 +491,88 @@ def score_job_context(job_context, resume_text, candidate_profile):
         reasons.append(f"verified via {job_context.get('verification_source')}")
 
     return score, reasons
+
+
+def extract_priority_job_keywords(job_context):
+    combined_text = "\n".join(
+        [job_context.get("job_title", ""), job_context.get("description", ""), job_context.get("page_text", "")[:4000]]
+    ).lower()
+    candidate_terms = re.findall(r"[a-zA-Z][a-zA-Z0-9\+#\./-]{2,}", combined_text)
+    stopwords = {
+        "with", "from", "that", "this", "have", "your", "will", "team", "role", "years", "using",
+        "into", "such", "than", "their", "about", "work", "data", "engineer", "manager", "senior",
+        "experience", "required", "preferred", "strong", "including", "support", "design", "build",
+    }
+    keywords = []
+    seen = set()
+    for term in candidate_terms:
+        if term in stopwords or term in seen:
+            continue
+        seen.add(term)
+        keywords.append(term)
+        if len(keywords) >= 60:
+            break
+    return keywords
+
+
+def analyze_resume_gaps(job_context, resume_text, candidate_profile):
+    job_keywords = extract_priority_job_keywords(job_context)
+    resume_keywords = set(extract_resume_keywords(resume_text))
+    preferred_roles = [normalize_text(item) for item in get_preferred_role_keywords()]
+
+    matched_keywords = [keyword for keyword in job_keywords if normalize_text(keyword) in resume_keywords][:15]
+    missing_keywords = [keyword for keyword in job_keywords if normalize_text(keyword) not in resume_keywords][:15]
+    role_matches = [keyword for keyword in preferred_roles if keyword and keyword in normalize_text(job_context.get("page_text", ""))]
+
+    readiness = "strong"
+    if len(missing_keywords) >= 10:
+        readiness = "medium"
+    if len(missing_keywords) >= 14:
+        readiness = "stretch"
+
+    return {
+        "readiness": readiness,
+        "matched_keywords": matched_keywords,
+        "missing_keywords": missing_keywords,
+        "role_matches": role_matches,
+        "candidate_location": candidate_profile.get("location"),
+    }
+
+
+def render_gap_analysis_markdown(job_context, gap_analysis):
+    matched = ", ".join(gap_analysis["matched_keywords"][:10]) or "No strong overlap detected"
+    missing = ", ".join(gap_analysis["missing_keywords"][:10]) or "No major missing keywords detected"
+    role_matches = ", ".join(gap_analysis["role_matches"][:6]) or "No preferred-role keyword matches recorded"
+    return (
+        "# Resume Gap Analysis\n\n"
+        f"## Role\n- Company: {job_context['company_name']}\n- Title: {job_context['job_title']}\n- Readiness: {gap_analysis['readiness']}\n\n"
+        f"## Current Matches\n- {matched}\n\n"
+        f"## Likely Gaps To Prepare\n- {missing}\n\n"
+        f"## Role Alignment Signals\n- {role_matches}\n"
+    )
+
+
+def render_follow_up_markdown(job_context, candidate_profile):
+    recruiter_message = (
+        f"Hi, I recently applied for the {job_context['job_title']} role at {job_context['company_name']}. "
+        "My background includes Snowflake, SQL, ETL, and production data-platform support, and I would welcome the chance "
+        "to discuss how I can contribute. Thank you for your time."
+    )
+    email_message = (
+        f"Subject: Application Follow-Up - {job_context['job_title']}\n\n"
+        f"Hello {job_context['company_name']} team,\n\n"
+        f"I applied for the {job_context['job_title']} position and wanted to follow up with continued interest. "
+        f"I bring experience in database and data-platform engineering, including Snowflake, SQL, ETL, automation, and production support. "
+        "If helpful, I would be glad to discuss my background further.\n\n"
+        f"Best regards,\n{candidate_profile['first_name']} {candidate_profile['last_name']}\n{candidate_profile['email']}\n{candidate_profile['phone']}"
+    )
+    return (
+        "# Recruiter Follow-Up Pack\n\n"
+        "## LinkedIn Message\n"
+        f"{recruiter_message}\n\n"
+        "## Email Follow-Up\n"
+        f"```text\n{email_message}\n```\n"
+    )
 
 
 def get_search_result_limit():
@@ -791,6 +988,8 @@ def build_artifact_paths(job_context):
     return {
         "artifact_dir": artifact_dir,
         "job_context_path": artifact_dir / "job_context.json",
+        "gap_analysis_path": artifact_dir / "gap_analysis.md",
+        "follow_up_path": artifact_dir / "follow_up.md",
         "tailored_resume_html_path": artifact_dir / "tailored_resume.html",
         "interview_prep_path": artifact_dir / "interview_prep.md",
     }
@@ -802,8 +1001,17 @@ def generate_application_documents(job_context, resume_path, candidate_profile):
     model_name = get_document_model()
     resume_excerpt = resume_text[: get_document_resume_char_limit()]
     job_excerpt = job_context["page_text"][: get_document_job_char_limit()]
+    gap_analysis = analyze_resume_gaps(job_context, resume_text, candidate_profile)
 
     artifact_paths["job_context_path"].write_text(json.dumps(job_context, indent=2), encoding="utf-8")
+    artifact_paths["gap_analysis_path"].write_text(
+        render_gap_analysis_markdown(job_context, gap_analysis),
+        encoding="utf-8",
+    )
+    artifact_paths["follow_up_path"].write_text(
+        render_follow_up_markdown(job_context, candidate_profile),
+        encoding="utf-8",
+    )
 
     resume_prompt = f"""
 You are tailoring a resume for a specific job application.
@@ -871,6 +1079,9 @@ Source resume text:
     return {
         "artifact_dir": str(artifact_paths["artifact_dir"]),
         "job_context_path": str(artifact_paths["job_context_path"]),
+        "gap_analysis_path": str(artifact_paths["gap_analysis_path"]),
+        "follow_up_path": str(artifact_paths["follow_up_path"]),
+        "gap_analysis": gap_analysis,
         "tailored_resume_html_path": str(artifact_paths["tailored_resume_html_path"]) if artifact_paths["tailored_resume_html_path"].exists() else None,
         "tailored_resume_pdf_path": str(tailored_resume_pdf_path) if tailored_resume_pdf_path else None,
         "interview_prep_path": str(artifact_paths["interview_prep_path"]),
@@ -882,21 +1093,45 @@ def load_application_history():
 
 
 def record_application_event(job_context, status, reason=None, artifacts=None):
+    initialize_application_store()
     history = load_application_history()
-    history.setdefault("applications", []).append(
-        {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "status": status,
-            "reason": reason,
-            "url": job_context.get("url"),
-            "company_name": job_context.get("company_name"),
-            "job_title": job_context.get("job_title"),
-            "verified": job_context.get("verified"),
-            "verification_source": job_context.get("verification_source"),
-            "artifacts": artifacts or {},
-        }
-    )
+    event = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "status": status,
+        "reason": reason,
+        "url": job_context.get("url"),
+        "company_name": job_context.get("company_name"),
+        "job_title": job_context.get("job_title"),
+        "verified": job_context.get("verified"),
+        "verification_source": job_context.get("verification_source"),
+        "artifacts": artifacts or {},
+    }
+    history.setdefault("applications", []).append(event)
     write_json_file(APPLICATION_LOG_FILE, history)
+
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO applications (
+                timestamp, status, reason, url, company_name, job_title, verified, verification_source,
+                score, source, artifacts_json, gap_analysis_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["timestamp"],
+                status,
+                reason,
+                event["url"],
+                event["company_name"],
+                event["job_title"],
+                1 if event["verified"] else 0,
+                event["verification_source"],
+                job_context.get("score"),
+                job_context.get("source", "runtime"),
+                json.dumps(event["artifacts"]),
+                json.dumps((artifacts or {}).get("gap_analysis")) if (artifacts or {}).get("gap_analysis") else None,
+            ),
+        )
 
 
 def count_successful_applications_today():
@@ -907,6 +1142,41 @@ def count_successful_applications_today():
         for entry in history.get("applications", [])
         if entry.get("status") == "success" and str(entry.get("timestamp", "")).startswith(today)
     )
+
+
+def list_recent_application_events(limit=100):
+    initialize_application_store()
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT timestamp, status, reason, url, company_name, job_title, verified,
+                   verification_source, score, source, artifacts_json, gap_analysis_json
+            FROM applications
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    events = []
+    for row in rows:
+        events.append(
+            {
+                "timestamp": row["timestamp"],
+                "status": row["status"],
+                "reason": row["reason"],
+                "url": row["url"],
+                "company_name": row["company_name"],
+                "job_title": row["job_title"],
+                "verified": bool(row["verified"]),
+                "verification_source": row["verification_source"],
+                "score": row["score"],
+                "source": row["source"],
+                "artifacts": json.loads(row["artifacts_json"] or "{}"),
+                "gap_analysis": json.loads(row["gap_analysis_json"] or "null"),
+            }
+        )
+    return events
 
 
 def print_daily_progress():
@@ -1009,11 +1279,13 @@ def cleanup_browser(profile_path):
 
 
 def build_agent_task(job_url, candidate_profile, upload_resume_path):
+    question_memory_context = build_question_memory_context()
     return (
         f"Navigate to {job_url}. "
         f"Before applying, confirm the employer appears verified on the page. If verification is missing or ambiguous, stop without applying. "
         f"Fill the application using this candidate profile: {candidate_profile}. "
         f"Upload {upload_resume_path}. "
+        f"{question_memory_context} "
         "Do not invent answers. If any required field cannot be answered from the provided data, stop and report the blocker. "
         "Submit only if the posting is from a verified company and the form is complete."
     )
@@ -1280,6 +1552,10 @@ def generate_docs_only(job_url, resume_path):
         print(f"[*] Tailored resume HTML: {package['artifacts']['tailored_resume_html_path']}")
     if package["artifacts"].get("tailored_resume_pdf_path"):
         print(f"[*] Tailored resume PDF: {package['artifacts']['tailored_resume_pdf_path']}")
+    if package["artifacts"].get("gap_analysis_path"):
+        print(f"[*] Resume gap analysis: {package['artifacts']['gap_analysis_path']}")
+    if package["artifacts"].get("follow_up_path"):
+        print(f"[*] Recruiter follow-up pack: {package['artifacts']['follow_up_path']}")
     print(f"[*] Interview prep doc: {package['artifacts']['interview_prep_path']}")
     return True
 

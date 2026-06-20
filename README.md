@@ -9,6 +9,8 @@ Automates job-application prep and browser submission with local fallback LLM su
 - Improved LinkedIn guest result extraction and ranking flow
 - Better local-model runtime controls for timeout, thinking, and vision behavior
 - Optional interview-prep-only generation and skip-doc-generation apply mode
+- Structured application tracking, reusable screening answers, and a lightweight app UI
+- Streamlit run controls and a FastAPI backend scaffold for a fuller app architecture
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 
@@ -32,6 +34,8 @@ The project is designed for a single candidate workflow:
 - Batch processing from a job URL list file
 - Per-job artifacts:
   - `job_context.json`
+  - `gap_analysis.md`
+  - `follow_up.md`
   - `tailored_resume.html`
   - `interview_prep.md`
 
@@ -39,6 +43,8 @@ The project is designed for a single candidate workflow:
 
 ```text
 apply_agent.py              Main automation script
+streamlit_app.py            Lightweight operator dashboard
+app_backend/                FastAPI backend scaffold
 .env.example                Safe environment template
 jobs.example.txt            Example batch input file
 docs/STEPS.md               Setup and operating steps
@@ -60,6 +66,8 @@ artifacts/                  Generated per-job outputs (ignored by git)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install browser-use python-dotenv requests pypdf langchain-google-genai
+pip install streamlit
+pip install fastapi uvicorn
 ```
 
 Optional if you want tailored resume PDF rendering instead of HTML-only output:
@@ -113,6 +121,18 @@ Discover matching jobs from LinkedIn and feed them directly into the verified to
 python .\apply_agent.py --job-search-query "data engineer" --job-search-location "Texas" --resume "wondi.pdf"
 ```
 
+Launch the lightweight app dashboard:
+
+```powershell
+streamlit run .\streamlit_app.py
+```
+
+Start the backend scaffold:
+
+```powershell
+uvicorn app_backend.main:app --reload
+```
+
 In batch mode, the script now:
 
 - screens every URL first
@@ -120,6 +140,8 @@ In batch mode, the script now:
 - filters out non-verified postings when verified-only mode is on
 - scores verified postings against preferred roles, locations, and resume overlap
 - selects only the highest-ranked jobs up to `DAILY_APPLICATION_TARGET`
+- records structured application events in a local SQLite store
+- reuses saved screening answers when they are available
 
 ## Verified-company policy
 
@@ -170,9 +192,39 @@ artifacts/YYYY-MM-DD/company-role/
 Typical files:
 
 - `job_context.json`
+- `gap_analysis.md`
+- `follow_up.md`
 - `tailored_resume.html`
 - `tailored_resume.pdf` when `weasyprint` is available
 - `interview_prep.md`
+
+## App mode
+
+The Streamlit app provides:
+
+- a dashboard of recent application events
+- LinkedIn discovery preview from a search query
+- one-click prep-pack generation for a job URL
+- reusable screening-answer memory management
+- a candidate profile snapshot for quick review
+
+Run it with:
+
+```powershell
+streamlit run .\streamlit_app.py
+```
+
+## Backend scaffold
+
+For a more serious app version, a FastAPI backend scaffold is included under `app_backend/`.
+
+Start it with:
+
+```powershell
+uvicorn app_backend.main:app --reload
+```
+
+Architecture notes are in [docs/APP_ARCHITECTURE.md](docs/APP_ARCHITECTURE.md).
 
 ## Notes
 

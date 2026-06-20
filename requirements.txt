@@ -3,3 +3,6 @@ python-dotenv
 requests
 pypdf
 langchain-google-genai
+streamlit
+fastapi
+uvicorn
