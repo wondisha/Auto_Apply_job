@@ -188,6 +188,15 @@ For automatic discovery, you can also tune:
 - `JOB_SEARCH_PORTAL` which currently supports `linkedin`
 - `JOB_SEARCH_RESULT_LIMIT` to cap how many public search results are screened before ranking
 
+## Running tests
+
+The test suite covers `core/config.py`, `core/profile.py`, `core/discovery.py`, and `core/ranking.py`. It makes no network, browser, or LLM calls.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
 ## Generated artifacts
 
 Per-job outputs are written under:
