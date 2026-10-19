@@ -33,11 +33,14 @@ C:\Users\techp\AppData\Local\Programs\Ollama\ollama.exe --version
 ## 3. Prepare configuration
 
 1. Copy `.env.example` to `.env`.
-2. Set `GOOGLE_API_KEY` if you want Gemini as the primary model.
-3. Keep `FALLBACK_LLM_PROVIDER=ollama` and `FALLBACK_LLM_MODEL=qwen2.5:3b` for free local fallback.
-4. Set `RESUME_PATH` to your real resume PDF.
-5. Add trusted companies to `VERIFIED_COMPANY_ALLOWLIST`.
-6. Tune `PREFERRED_ROLE_KEYWORDS` and `PREFERRED_LOCATION_KEYWORDS` so the top-5 selector matches the jobs you actually want.
+2. Replace the candidate profile placeholders with your values: `CANDIDATE_FIRST_NAME`, `CANDIDATE_LAST_NAME`, `CANDIDATE_EMAIL`, `CANDIDATE_PHONE`, `CANDIDATE_LINKEDIN_URL`, `CANDIDATE_GITHUB_URL`, `CANDIDATE_LOCATION`, and `CANDIDATE_SPONSORSHIP_NEEDED` (`Yes` or `No`).
+3. Set `GOOGLE_API_KEY` if you want Gemini as the primary model.
+4. Keep `FALLBACK_LLM_PROVIDER=ollama` and `FALLBACK_LLM_MODEL=qwen2.5:3b` for free local fallback.
+5. Set `RESUME_PATH` to your real resume PDF.
+6. Add trusted companies to `VERIFIED_COMPANY_ALLOWLIST`.
+7. Tune `PREFERRED_ROLE_KEYWORDS` and `PREFERRED_LOCATION_KEYWORDS` so the top-5 selector matches the jobs you actually want.
+
+All candidate profile fields are required for preflight, document generation, and apply flows. The Streamlit Candidate Profile Snapshot displays the values currently configured. Keep `.env` private and do not commit it.
 
 ## 4. Choose discovery mode or a manual job list
 

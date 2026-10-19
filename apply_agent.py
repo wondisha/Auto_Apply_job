@@ -389,16 +389,52 @@ def get_verified_company_allowlist():
 
 
 def get_candidate_profile():
-    return {
-        "first_name": "Wondi",
-        "last_name": "Wolde",
-        "email": "wondenad@gmail.com",
-        "phone": "240-505-7107",
-        "linkedin_url": "https://linkedin.com/in/wondi",
-        "github_url": "https://github.com/wondisha",
-        "location": "Garland, Texas",
-        "sponsorship_needed": "No",
+    profile_env_vars = {
+        "first_name": "CANDIDATE_FIRST_NAME",
+        "last_name": "CANDIDATE_LAST_NAME",
+        "email": "CANDIDATE_EMAIL",
+        "phone": "CANDIDATE_PHONE",
+        "linkedin_url": "CANDIDATE_LINKEDIN_URL",
+        "github_url": "CANDIDATE_GITHUB_URL",
+        "location": "CANDIDATE_LOCATION",
+        "sponsorship_needed": "CANDIDATE_SPONSORSHIP_NEEDED",
     }
+    return {profile_key: os.getenv(env_name, "").strip() for profile_key, env_name in profile_env_vars.items()}
+
+
+def validate_candidate_profile(candidate_profile=None):
+    profile_env_vars = {
+        "first_name": "CANDIDATE_FIRST_NAME",
+        "last_name": "CANDIDATE_LAST_NAME",
+        "email": "CANDIDATE_EMAIL",
+        "phone": "CANDIDATE_PHONE",
+        "linkedin_url": "CANDIDATE_LINKEDIN_URL",
+        "github_url": "CANDIDATE_GITHUB_URL",
+        "location": "CANDIDATE_LOCATION",
+        "sponsorship_needed": "CANDIDATE_SPONSORSHIP_NEEDED",
+    }
+    profile = candidate_profile if candidate_profile is not None else get_candidate_profile()
+    missing = [
+        env_name
+        for profile_key, env_name in profile_env_vars.items()
+        if not profile.get(profile_key, "").strip()
+        or "<" in profile.get(profile_key, "")
+        or ">" in profile.get(profile_key, "")
+    ]
+    if missing:
+        variables = ", ".join(missing)
+        raise ValueError(
+            f"Candidate profile is incomplete. Set {variables} in .env "
+            "(copy .env.example to .env) or export them in your environment."
+        )
+
+    if profile["sponsorship_needed"].strip().lower() not in {"yes", "no"}:
+        raise ValueError(
+            "CANDIDATE_SPONSORSHIP_NEEDED must be Yes or No. "
+            "Configure it in .env (copy .env.example to .env) or your environment."
+        )
+
+    return profile
 
 
 def split_csv_env(name, fallback=""):
@@ -1186,6 +1222,7 @@ def print_daily_progress():
 
 
 def run_startup_preflight(job_url, resume_path):
+    validate_candidate_profile()
     validate_target_job_url(job_url)
 
     resume_file = Path(resume_path).expanduser()
@@ -1296,6 +1333,7 @@ def should_skip_document_generation_for_apply():
 
 
 def prepare_application_package(job_url, resume_path, candidate_profile):
+    validate_candidate_profile(candidate_profile)
     job_context = fetch_job_posting_context(job_url)
     verified, verification_source = classify_company_verification(job_context)
     job_context["verified"] = verified
