@@ -28,6 +28,17 @@ from core.config import (
     should_use_agent_vision,
 )
 from core.discovery import discover_job_urls
+from core.errors import (
+    ApplicationRunError,
+    AutoApplyError,
+    ConfigurationError,
+    DiscoveryError,
+    DocumentGenerationError,
+    PersistenceError,
+    describe_error,
+    exit_code_for,
+)
+from core.logging_config import configure_logging, get_logger, redact_text
 from core.profile import get_candidate_profile, validate_candidate_profile
 from core.ranking import (
     analyze_resume_gaps,
@@ -38,6 +49,8 @@ from core.ranking import (
 )
 
 load_dotenv()
+configure_logging()
+logger = get_logger(__name__)
 
 STATUS_FILE = Path(__file__).with_name(".agent_status.json")
 APPLICATION_LOG_FILE = Path(__file__).with_name(".application_history.json")
@@ -58,7 +71,7 @@ def resolve_ollama_executable():
         candidate = Path(env_path).expanduser()
         if candidate.is_file():
             return str(candidate)
-        raise FileNotFoundError(f"OLLAMA_EXECUTABLE_PATH does not exist: {candidate}")
+        raise ConfigurationError(f"OLLAMA_EXECUTABLE_PATH does not exist: {candidate}")
 
     path_executable = shutil.which("ollama")
     if path_executable:
@@ -73,7 +86,7 @@ def resolve_ollama_executable():
         if candidate.is_file():
             return str(candidate)
 
-    raise FileNotFoundError(
+    raise ConfigurationError(
         "Ollama is not installed or not discoverable. Install Ollama, add it to PATH, or set OLLAMA_EXECUTABLE_PATH."
     )
 
@@ -84,7 +97,7 @@ def resolve_browser_executable():
         candidate = Path(env_path).expanduser()
         if candidate.is_file():
             return str(candidate)
-        raise FileNotFoundError(f"BROWSER_EXECUTABLE_PATH does not exist: {candidate}")
+        raise ConfigurationError(f"BROWSER_EXECUTABLE_PATH does not exist: {candidate}")
 
     candidates = [
         Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
@@ -99,7 +112,7 @@ def resolve_browser_executable():
         if candidate.is_file():
             return str(candidate)
 
-    raise FileNotFoundError(
+    raise ConfigurationError(
         "No supported Chrome/Edge executable was found. Set BROWSER_EXECUTABLE_PATH to a valid browser binary."
     )
 
@@ -119,7 +132,7 @@ def create_primary_llm():
     if os.getenv("USE_FALLBACK_AS_PRIMARY", "0").strip().lower() in {"1", "true", "yes"}:
         fallback_llm = create_fallback_llm()
         if fallback_llm is None:
-            raise ValueError("USE_FALLBACK_AS_PRIMARY is enabled, but no fallback LLM is configured.")
+            raise ConfigurationError("USE_FALLBACK_AS_PRIMARY is enabled, but no fallback LLM is configured.")
         return fallback_llm
 
     return ChatGoogle(
@@ -189,7 +202,7 @@ def create_fallback_llm():
             host=os.getenv("FALLBACK_OLLAMA_HOST") or os.getenv("OLLAMA_HOST"),
         )
 
-    raise ValueError(
+    raise ConfigurationError(
         f"Unsupported FALLBACK_LLM_PROVIDER '{provider}'. Supported values: google, openai, anthropic, groq, litellm, ollama."
     )
 
@@ -205,11 +218,17 @@ def read_json_file(path, default_value):
 
 
 def write_json_file(path, payload):
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    try:
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise PersistenceError(f"Could not write state file {path.name}: {exc}") from exc
 
 
 def get_db_connection():
-    connection = sqlite3.connect(APPLICATION_DB_FILE)
+    try:
+        connection = sqlite3.connect(APPLICATION_DB_FILE)
+    except sqlite3.Error as exc:
+        raise PersistenceError(f"Could not open application database: {exc}") from exc
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -386,8 +405,8 @@ def rank_job_urls(job_urls, resume_path, candidate_profile):
 def validate_ollama_runtime(model):
     try:
         ollama_executable = resolve_ollama_executable()
-    except FileNotFoundError as exc:
-        raise ValueError(
+    except ConfigurationError as exc:
+        raise ConfigurationError(
             "Fallback provider 'ollama' is configured, but Ollama is not installed or not discoverable. "
             "Install Ollama, add it to PATH, or set OLLAMA_EXECUTABLE_PATH."
         ) from exc
@@ -401,15 +420,15 @@ def validate_ollama_runtime(model):
             timeout=15,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ValueError("Ollama is installed, but 'ollama list' timed out. Make sure the Ollama service is running.") from exc
+        raise ConfigurationError("Ollama is installed, but 'ollama list' timed out. Make sure the Ollama service is running.") from exc
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
-        raise ValueError(f"Ollama is installed, but model discovery failed: {stderr or exc}") from exc
+        raise ConfigurationError(f"Ollama is installed, but model discovery failed: {stderr or exc}") from exc
 
     installed_models = result.stdout.lower()
     requested_model = model.lower()
     if requested_model not in installed_models:
-        raise ValueError(
+        raise ConfigurationError(
             f"Ollama fallback model '{model}' is not installed. Run 'ollama pull {model}' first."
         )
 
@@ -431,13 +450,13 @@ def validate_fallback_configuration():
     }
 
     if provider not in required_by_provider:
-        raise ValueError(
+        raise ConfigurationError(
             f"Unsupported FALLBACK_LLM_PROVIDER '{provider}'. Supported values: google, openai, anthropic, groq, litellm, ollama."
         )
 
     required_vars = required_by_provider[provider]
     if required_vars and not any(os.getenv(name) for name in required_vars):
-        raise ValueError(
+        raise ConfigurationError(
             f"Fallback provider '{provider}' requires one of these environment variables: {', '.join(required_vars)}"
         )
 
@@ -450,11 +469,11 @@ def validate_fallback_configuration():
 def validate_target_job_url(job_url):
     parsed = urlparse(job_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(f"TARGET_JOB_URL must be a valid http(s) URL. Got: {job_url}")
+        raise ConfigurationError(f"TARGET_JOB_URL must be a valid http(s) URL. Got: {job_url}")
 
     placeholder_hosts = {"example.com", "www.example.com"}
     if parsed.netloc.lower() in placeholder_hosts:
-        raise ValueError(
+        raise ConfigurationError(
             "TARGET_JOB_URL is still set to the example placeholder. Set it to the real application form URL."
         )
 
@@ -535,7 +554,7 @@ def extract_resume_text(resume_path):
     extracted_pages = [(page.extract_text() or "").strip() for page in reader.pages]
     resume_text = "\n\n".join(page for page in extracted_pages if page)
     if not resume_text.strip():
-        raise ValueError(f"Could not extract text from resume PDF: {resume_path}")
+        raise DocumentGenerationError(f"Could not extract text from resume PDF: {resume_path}")
     return resume_text
 
 
@@ -576,7 +595,7 @@ def generate_ollama_text(prompt, model=None):
     payload = response.json()
     generated_text = payload.get("response", "").strip()
     if not generated_text:
-        raise ValueError("Ollama returned an empty response while generating application materials.")
+        raise DocumentGenerationError("Ollama returned an empty response while generating application materials.")
     return generated_text
 
 
@@ -827,7 +846,7 @@ def list_recent_application_events(limit=100):
 def print_daily_progress():
     successes = count_successful_applications_today()
     target = get_daily_application_target()
-    print(f"[*] Daily verified application progress: {successes}/{target}")
+    logger.info(f"Daily verified application progress: {successes}/{target}")
 
 
 def run_startup_preflight(job_url, resume_path):
@@ -836,7 +855,7 @@ def run_startup_preflight(job_url, resume_path):
 
     resume_file = Path(resume_path).expanduser()
     if not resume_file.is_file():
-        raise FileNotFoundError(f"Resume file not found: {resume_file}")
+        raise ConfigurationError(f"Resume file not found: {resume_file}")
 
     browser_path = resolve_browser_executable()
     fallback_config = validate_fallback_configuration()
@@ -845,31 +864,31 @@ def run_startup_preflight(job_url, resume_path):
     job_context = fetch_job_posting_context(job_url)
     verified, verification_source = classify_company_verification(job_context)
 
-    print(f"[*] Browser executable: {browser_path}")
-    print(f"[*] Target job URL: {job_url}")
-    print(f"[*] Parsed job: {job_context['company_name']} / {job_context['job_title']}")
-    print(f"[*] Primary LLM: google/{primary_model}")
-    print(f"[*] Verified-only mode: {'on' if require_verified_company() else 'off'}")
+    logger.info(f"Browser executable: {browser_path}")
+    logger.info(f"Target job URL: {job_url}")
+    logger.info(f"Parsed job: {job_context['company_name']} / {job_context['job_title']}")
+    logger.info(f"Primary LLM: google/{primary_model}")
+    logger.info(f"Verified-only mode: {'on' if require_verified_company() else 'off'}")
 
     if fallback_config is None:
-        print("[!] No fallback LLM configured. Gemini quota exhaustion will stop the run.")
+        logger.warning("No fallback LLM configured. Gemini quota exhaustion will stop the run.")
     else:
         provider, model = fallback_config
-        print(f"[*] Fallback LLM ready: {provider}/{model}")
-        print(
-            f"[*] Agent runtime settings: llm_timeout={get_agent_llm_timeout_seconds()}s, "
+        logger.info(f"Fallback LLM ready: {provider}/{model}")
+        logger.info(
+            f"Agent runtime settings: llm_timeout={get_agent_llm_timeout_seconds()}s, "
             f"step_timeout={get_agent_step_timeout_seconds()}s, use_thinking={'on' if should_use_agent_thinking() else 'off'}, "
             f"use_vision={'on' if should_use_agent_vision() else 'off'}"
         )
 
     if verified:
-        print(f"[*] Company verification accepted via {verification_source}")
+        logger.info(f"Company verification accepted via {verification_source}")
     else:
-        print(f"[!] Company verification not confirmed: {verification_source}")
+        logger.warning(f"Company verification not confirmed: {verification_source}")
 
     if status.get("daily_quota_exhausted") and status.get("provider") == "google" and status.get("model") == primary_model:
-        print(
-            "[!] Previous run recorded Gemini daily quota exhaustion for the current primary model. "
+        logger.warning(
+            "Previous run recorded Gemini daily quota exhaustion for the current primary model. "
             "If quota has not reset yet, the primary model will fail immediately."
         )
 
@@ -919,9 +938,9 @@ def cleanup_browser(profile_path):
     if os.path.exists(profile_path):
         try:
             shutil.rmtree(profile_path)
-            print("[*] Cleaned up stale browser profile.")
+            logger.info("Cleaned up stale browser profile.")
         except PermissionError:
-            print("[!] Warning: Could not delete profile. Browser might be running.")
+            logger.warning("Warning: Could not delete profile. Browser might be running.")
 
 
 def build_agent_task(job_url, candidate_profile, upload_resume_path):
@@ -958,7 +977,7 @@ def prepare_application_package(job_url, resume_path, candidate_profile):
         }
 
     if should_skip_document_generation_for_apply():
-        print("[!] Skipping tailored document generation for live apply. Using the original resume for upload.")
+        logger.warning("Skipping tailored document generation for live apply. Using the original resume for upload.")
         return {
             "job_context": job_context,
             "should_apply": True,
@@ -970,7 +989,7 @@ def prepare_application_package(job_url, resume_path, candidate_profile):
     artifacts = generate_application_documents(job_context, Path(resume_path).expanduser(), candidate_profile)
     upload_resume_path = artifacts.get("tailored_resume_pdf_path") or str(Path(resume_path).expanduser())
     if not artifacts.get("tailored_resume_pdf_path"):
-        print("[!] Tailored resume PDF was not rendered. Using the original PDF for upload; tailored HTML was still generated.")
+        logger.warning("Tailored resume PDF was not rendered. Using the original PDF for upload; tailored HTML was still generated.")
 
     return {
         "job_context": job_context,
@@ -989,7 +1008,7 @@ async def run_application_agent(job_url, resume_path):
     job_context = package["job_context"]
 
     if not package["should_apply"]:
-        print(f"[!] Skipping application for {job_context['company_name']}: {package['reason']}")
+        logger.warning(f"Skipping application for {job_context['company_name']}: {package['reason']}")
         record_application_event(job_context, "skipped", reason=package["reason"], artifacts=package["artifacts"])
         return False
 
@@ -1009,7 +1028,7 @@ async def run_application_agent(job_url, resume_path):
         llm = create_primary_llm()
         fallback_llm = create_fallback_llm()
         if fallback_llm is not None:
-            print(f"[*] Fallback LLM enabled: provider={fallback_llm.provider}, model={fallback_llm.model}")
+            logger.info(f"Fallback LLM enabled: provider={fallback_llm.provider}, model={fallback_llm.model}")
 
         task = build_agent_task(job_url, candidate_profile, os.path.abspath(package["upload_resume_path"]))
         max_retries = int(os.getenv("AGENT_MAX_RETRIES", "3"))
@@ -1031,7 +1050,7 @@ async def run_application_agent(job_url, resume_path):
             )
             if not hasattr(agent, "_task_start_time"):
                 agent._task_start_time = time.time()
-            print(f"[*] Starting agent (Attempt {attempt + 1})")
+            logger.info(f"Starting agent (Attempt {attempt + 1})")
 
             try:
                 history = await agent.run()
@@ -1041,18 +1060,18 @@ async def run_application_agent(job_url, resume_path):
                     wait_time = extract_retry_delay_seconds(error_msg)
                     if wait_time is None or wait_time <= 0:
                         wait_time = min(30 * (attempt + 1), 300)
-                    print(f"[!] Quota exhausted before completion. Sleeping for {wait_time:.1f} seconds...")
+                    logger.warning(f"Quota exhausted before completion. Sleeping for {wait_time:.1f} seconds...")
                     await asyncio.sleep(wait_time + 2)
                     continue
 
-                print(f"[!] Unexpected error: {error_msg}")
+                logger.error(f"Unexpected error: {error_msg}")
                 record_application_event(job_context, "failed", reason=error_msg, artifacts=package["artifacts"])
                 return False
 
             if history.is_successful():
                 clear_status_record()
                 record_application_event(job_context, "success", artifacts=package["artifacts"])
-                print("[+] Application workflow complete!")
+                logger.info("Application workflow complete!")
                 print_daily_progress()
                 return True
 
@@ -1070,18 +1089,18 @@ async def run_application_agent(job_url, resume_path):
                             }
                         )
                         record_application_event(job_context, "failed", reason=error_msg, artifacts=package["artifacts"])
-                        print("[!] Gemini daily free-tier quota exhausted. Retry tomorrow or switch to a billed API key/model.")
+                        logger.warning("Gemini daily free-tier quota exhausted. Retry tomorrow or switch to a billed API key/model.")
                         return False
 
                     if attempt < max_retries - 1:
                         wait_time = extract_retry_delay_seconds(error_msg)
                         if wait_time is None or wait_time <= 0:
                             wait_time = min(30 * (attempt + 1), 300)
-                        print(f"[!] Gemini rate limit hit. Sleeping for {wait_time:.1f} seconds before retry...")
+                        logger.warning(f"Gemini rate limit hit. Sleeping for {wait_time:.1f} seconds before retry...")
                         await asyncio.sleep(wait_time + 2)
                         continue
 
-                    print("[!] Gemini quota exhausted and retry budget reached.")
+                    logger.warning("Gemini quota exhausted and retry budget reached.")
                     save_status_record(
                         {
                             "daily_quota_exhausted": False,
@@ -1095,13 +1114,13 @@ async def run_application_agent(job_url, resume_path):
 
                 save_status_record({"daily_quota_exhausted": False, "last_error": error_msg})
                 record_application_event(job_context, "failed", reason=error_msg, artifacts=package["artifacts"])
-                print(f"[!] Agent stopped with errors:\n{error_msg}")
+                logger.error(f"Agent stopped with errors:\n{error_msg}")
                 return False
 
             message = "Agent stopped without completing the task."
             save_status_record({"daily_quota_exhausted": False, "last_error": message})
             record_application_event(job_context, "failed", reason=message, artifacts=package["artifacts"])
-            print(f"[!] {message}")
+            logger.warning(f"{message}")
             return False
 
         return False
@@ -1123,7 +1142,7 @@ async def smoke_test_browser():
 
     try:
         await browser.start()
-        print(f"[+] Browser launch OK with {browser_executable}")
+        logger.info(f"Browser launch OK with {browser_executable}")
     finally:
         await browser.close()
         if cleanup_profile:
@@ -1138,7 +1157,7 @@ def load_job_urls(job_url, job_urls_file, job_search_query=None, job_search_loca
     if job_urls_file:
         job_urls_path = Path(job_urls_file).expanduser()
         if not job_urls_path.is_file():
-            raise FileNotFoundError(f"Job URL list file not found: {job_urls_path}")
+            raise ConfigurationError(f"Job URL list file not found: {job_urls_path}")
         file_urls = [line.strip() for line in job_urls_path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.strip().startswith("#")]
         urls.extend(file_urls)
 
@@ -1149,8 +1168,8 @@ def load_job_urls(job_url, job_urls_file, job_search_query=None, job_search_loca
             portal=job_search_portal,
             max_results=get_search_result_limit(),
         )
-        print(
-            f"[*] Discovered {len(discovered_urls)} {job_search_portal or os.getenv('JOB_SEARCH_PORTAL', 'linkedin')} jobs for "
+        logger.info(
+            f"Discovered {len(discovered_urls)} {job_search_portal or os.getenv('JOB_SEARCH_PORTAL', 'linkedin')} jobs for "
             f"'{job_search_query}'{f' in {job_search_location}' if job_search_location else ''}."
         )
         urls.extend(discovered_urls)
@@ -1163,7 +1182,7 @@ def load_job_urls(job_url, job_urls_file, job_search_query=None, job_search_loca
             seen.add(url)
 
     if not deduplicated:
-        raise ValueError("Provide --job-url or --job-urls-file with at least one real job posting URL.")
+        raise ConfigurationError("Provide --job-url or --job-urls-file with at least one real job posting URL.")
 
     return deduplicated
 
@@ -1175,7 +1194,7 @@ def preview_ranked_jobs(job_urls, resume_path):
     target_count = min(get_daily_application_target(), len(eligible_ranked_jobs))
 
     if not eligible_ranked_jobs:
-        print("[!] No verified jobs qualified for application after screening.")
+        logger.warning("No verified jobs qualified for application after screening.")
         for item in ranked_jobs:
             context = item["job_context"]
             reason_text = "; ".join(item["reasons"][:3]) if item["reasons"] else "not eligible"
@@ -1193,17 +1212,17 @@ def generate_docs_only(job_url, resume_path):
     candidate_profile = get_candidate_profile()
     package = prepare_application_package(job_url, resume_path, candidate_profile)
     if not package["should_apply"]:
-        raise ValueError(package["reason"])
+        raise DocumentGenerationError(package["reason"])
 
     if package["artifacts"].get("tailored_resume_html_path"):
-        print(f"[*] Tailored resume HTML: {package['artifacts']['tailored_resume_html_path']}")
+        logger.info(f"Tailored resume HTML: {package['artifacts']['tailored_resume_html_path']}")
     if package["artifacts"].get("tailored_resume_pdf_path"):
-        print(f"[*] Tailored resume PDF: {package['artifacts']['tailored_resume_pdf_path']}")
+        logger.info(f"Tailored resume PDF: {package['artifacts']['tailored_resume_pdf_path']}")
     if package["artifacts"].get("gap_analysis_path"):
-        print(f"[*] Resume gap analysis: {package['artifacts']['gap_analysis_path']}")
+        logger.info(f"Resume gap analysis: {package['artifacts']['gap_analysis_path']}")
     if package["artifacts"].get("follow_up_path"):
-        print(f"[*] Recruiter follow-up pack: {package['artifacts']['follow_up_path']}")
-    print(f"[*] Interview prep doc: {package['artifacts']['interview_prep_path']}")
+        logger.info(f"Recruiter follow-up pack: {package['artifacts']['follow_up_path']}")
+    logger.info(f"Interview prep doc: {package['artifacts']['interview_prep_path']}")
     return True
 
 
@@ -1214,7 +1233,7 @@ async def run_job_plan(job_urls, resume_path, docs_only=False):
             try:
                 generate_docs_only(job_url, resume_path)
             except Exception as exc:
-                print(f"[!] Failed to prepare documents for {job_url}: {exc}")
+                logger.error(f"Failed to prepare documents for {job_url}: {exc}")
                 all_generated = False
         return all_generated
 
@@ -1224,10 +1243,10 @@ async def run_job_plan(job_urls, resume_path, docs_only=False):
     target = get_daily_application_target()
     starting_successes = count_successful_applications_today()
     remaining_target = max(target - starting_successes, 0)
-    print(f"[*] Starting batch run with {len(job_urls)} URLs. Daily target: {target}")
+    logger.info(f"Starting batch run with {len(job_urls)} URLs. Daily target: {target}")
 
     if starting_successes >= target:
-        print("[*] Daily target already met. No new applications will be submitted.")
+        logger.info("Daily target already met. No new applications will be submitted.")
         return True
 
     candidate_profile = get_candidate_profile()
@@ -1235,7 +1254,7 @@ async def run_job_plan(job_urls, resume_path, docs_only=False):
     eligible_ranked_jobs = [item for item in ranked_jobs if item["eligible"]]
 
     if not eligible_ranked_jobs:
-        print("[!] No verified jobs qualified for application after screening.")
+        logger.warning("No verified jobs qualified for application after screening.")
         for item in ranked_jobs:
             context = item["job_context"]
             record_application_event(
@@ -1265,7 +1284,7 @@ async def run_job_plan(job_urls, resume_path, docs_only=False):
         await run_application_agent(item["url"], resume_path)
 
     final_successes = count_successful_applications_today()
-    print(f"[*] Batch complete. Daily verified applications: {final_successes}/{target}")
+    logger.info(f"Batch complete. Daily verified applications: {final_successes}/{target}")
     return final_successes >= target
 
 
@@ -1275,7 +1294,7 @@ def run_docs_plan(job_urls, resume_path):
         try:
             generate_docs_only(job_url, resume_path)
         except Exception as exc:
-            print(f"[!] Failed to prepare documents for {job_url}: {exc}")
+            logger.error(f"Failed to prepare documents for {job_url}: {exc}")
             all_generated = False
     return all_generated
 
@@ -1326,6 +1345,22 @@ def has_explicit_job_input(args):
     )
 
 
+BOUNDARY_ERRORS = (AutoApplyError, FileNotFoundError, ValueError, requests.RequestException)
+
+
+def exit_with_error(exc):
+    """Log a consistent user-facing message for a boundary error and exit with its mapped code."""
+    if not isinstance(exc, AutoApplyError):
+        wrapper_cls = DiscoveryError if isinstance(exc, requests.RequestException) else ConfigurationError
+        wrapped = wrapper_cls(str(exc))
+        wrapped.__cause__ = exc
+        exc = wrapped
+    message = describe_error(exc)
+    logger.error(redact_text(message))
+    logger.debug("Boundary error details", exc_info=exc)
+    raise SystemExit(exit_code_for(exc)) from exc
+
+
 if __name__ == "__main__":
     args = parse_cli_args()
 
@@ -1340,37 +1375,33 @@ if __name__ == "__main__":
             job_search_location=args.job_search_location,
             job_search_portal=args.job_search_portal,
         )
-    except (FileNotFoundError, ValueError, requests.RequestException) as exc:
+    except BOUNDARY_ERRORS as exc:
         if has_explicit_job_input(args):
-            print(f"[!] Configuration error: {exc}")
-            raise SystemExit(1) from exc
+            exit_with_error(exc)
         job_urls = [target_job_url]
 
     if args.preflight:
         try:
             for job_url in job_urls:
                 run_startup_preflight(job_url, my_tailored_pdf)
-            print("[+] Preflight OK")
-        except (FileNotFoundError, ValueError, requests.RequestException) as exc:
-            print(f"[!] Configuration error: {exc}")
-            raise SystemExit(1) from exc
+            logger.info("Preflight OK")
+        except BOUNDARY_ERRORS as exc:
+            exit_with_error(exc)
         raise SystemExit(0)
 
     if args.generate_docs_only:
         try:
             success = run_docs_plan(job_urls, my_tailored_pdf)
-        except (FileNotFoundError, ValueError, requests.RequestException) as exc:
-            print(f"[!] Configuration error: {exc}")
-            raise SystemExit(1) from exc
+        except BOUNDARY_ERRORS as exc:
+            exit_with_error(exc)
 
         raise SystemExit(0 if success else 1)
 
     if args.discover_only:
         try:
             success = preview_ranked_jobs(job_urls, my_tailored_pdf)
-        except (FileNotFoundError, ValueError, requests.RequestException) as exc:
-            print(f"[!] Configuration error: {exc}")
-            raise SystemExit(1) from exc
+        except BOUNDARY_ERRORS as exc:
+            exit_with_error(exc)
 
         raise SystemExit(0 if success else 1)
 
@@ -1379,8 +1410,11 @@ if __name__ == "__main__":
     else:
         try:
             success = asyncio.run(run_job_plan(job_urls, my_tailored_pdf, docs_only=False))
-        except (FileNotFoundError, ValueError, requests.RequestException) as exc:
-            print(f"[!] Configuration error: {exc}")
-            raise SystemExit(1) from exc
+        except BOUNDARY_ERRORS as exc:
+            exit_with_error(exc)
+        except Exception as exc:
+            run_error = ApplicationRunError(f"Application run failed unexpectedly: {exc}")
+            run_error.__cause__ = exc
+            exit_with_error(run_error)
 
         raise SystemExit(0 if success else 1)
