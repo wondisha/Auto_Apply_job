@@ -42,7 +42,11 @@ The project is designed for a single candidate workflow:
 ## Repository layout
 
 ```text
-apply_agent.py              Main automation script
+apply_agent.py              CLI entrypoint and workflow orchestration
+core/config.py              Env parsing helpers and runtime setting accessors
+core/profile.py             Candidate profile loading and validation
+core/discovery.py           LinkedIn search URL building and job URL discovery
+core/ranking.py             Scoring, keyword extraction, and ranking helpers
 streamlit_app.py            Lightweight operator dashboard
 app_backend/                FastAPI backend scaffold
 .env.example                Safe environment template

@@ -11,11 +11,31 @@ import tempfile
 import time
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
 from browser_use import Agent, Browser, ChatGoogle
+
+from core.config import (
+    get_agent_llm_timeout_seconds,
+    get_agent_step_timeout_seconds,
+    get_daily_application_target,
+    get_search_result_limit,
+    get_verified_company_allowlist,
+    require_verified_company,
+    should_use_agent_thinking,
+    should_use_agent_vision,
+)
+from core.discovery import discover_job_urls
+from core.profile import get_candidate_profile, validate_candidate_profile
+from core.ranking import (
+    analyze_resume_gaps,
+    print_ranked_job_summary,
+    render_follow_up_markdown,
+    render_gap_analysis_markdown,
+    score_job_context,
+)
 
 load_dotenv()
 
@@ -30,7 +50,6 @@ VERIFIED_MARKERS = (
     "linkedin verified",
     "verified hiring",
 )
-SUPPORTED_SEARCH_PORTALS = {"linkedin"}
 
 
 def resolve_ollama_executable():
@@ -175,56 +194,6 @@ def create_fallback_llm():
     )
 
 
-def get_fallback_provider_name():
-    return os.getenv("FALLBACK_LLM_PROVIDER", os.getenv("FALLBACK_PROVIDER", "google")).strip().lower()
-
-
-def get_agent_llm_timeout_seconds():
-    configured = os.getenv("AGENT_LLM_TIMEOUT", "180").strip() or "180"
-    try:
-        timeout = int(configured)
-    except ValueError as exc:
-        raise ValueError(f"AGENT_LLM_TIMEOUT must be an integer. Got: {configured}") from exc
-
-    if timeout <= 0:
-        raise ValueError("AGENT_LLM_TIMEOUT must be greater than zero.")
-
-    return timeout
-
-
-def get_agent_step_timeout_seconds():
-    configured = os.getenv("AGENT_STEP_TIMEOUT", "240").strip() or "240"
-    try:
-        timeout = int(configured)
-    except ValueError as exc:
-        raise ValueError(f"AGENT_STEP_TIMEOUT must be an integer. Got: {configured}") from exc
-
-    if timeout <= 0:
-        raise ValueError("AGENT_STEP_TIMEOUT must be greater than zero.")
-
-    return timeout
-
-
-def should_use_agent_thinking():
-    configured = os.getenv("AGENT_USE_THINKING", "").strip().lower()
-    if configured:
-        return configured not in {"0", "false", "no"}
-
-    return get_fallback_provider_name() != "ollama"
-
-
-def should_use_agent_vision():
-    configured = os.getenv("AGENT_USE_VISION", "").strip().lower()
-    if configured:
-        return configured not in {"0", "false", "no"}
-
-    provider = get_fallback_provider_name()
-    if provider == "ollama":
-        return False
-
-    return True
-
-
 def read_json_file(path, default_value):
     if not path.exists():
         return default_value
@@ -366,356 +335,6 @@ def clear_status_record():
         pass
 
 
-def get_daily_application_target():
-    configured = os.getenv("DAILY_APPLICATION_TARGET", "5").strip() or "5"
-    try:
-        target = int(configured)
-    except ValueError as exc:
-        raise ValueError(f"DAILY_APPLICATION_TARGET must be an integer. Got: {configured}") from exc
-
-    if target <= 0:
-        raise ValueError("DAILY_APPLICATION_TARGET must be greater than zero.")
-
-    return target
-
-
-def require_verified_company():
-    return os.getenv("REQUIRE_VERIFIED_COMPANY", "1").strip().lower() not in {"0", "false", "no"}
-
-
-def get_verified_company_allowlist():
-    allowlist = os.getenv("VERIFIED_COMPANY_ALLOWLIST", "")
-    return {entry.strip().lower() for entry in allowlist.split(",") if entry.strip()}
-
-
-def get_candidate_profile():
-    profile_env_vars = {
-        "first_name": "CANDIDATE_FIRST_NAME",
-        "last_name": "CANDIDATE_LAST_NAME",
-        "email": "CANDIDATE_EMAIL",
-        "phone": "CANDIDATE_PHONE",
-        "linkedin_url": "CANDIDATE_LINKEDIN_URL",
-        "github_url": "CANDIDATE_GITHUB_URL",
-        "location": "CANDIDATE_LOCATION",
-        "sponsorship_needed": "CANDIDATE_SPONSORSHIP_NEEDED",
-    }
-    return {profile_key: os.getenv(env_name, "").strip() for profile_key, env_name in profile_env_vars.items()}
-
-
-def validate_candidate_profile(candidate_profile=None):
-    profile_env_vars = {
-        "first_name": "CANDIDATE_FIRST_NAME",
-        "last_name": "CANDIDATE_LAST_NAME",
-        "email": "CANDIDATE_EMAIL",
-        "phone": "CANDIDATE_PHONE",
-        "linkedin_url": "CANDIDATE_LINKEDIN_URL",
-        "github_url": "CANDIDATE_GITHUB_URL",
-        "location": "CANDIDATE_LOCATION",
-        "sponsorship_needed": "CANDIDATE_SPONSORSHIP_NEEDED",
-    }
-    profile = candidate_profile if candidate_profile is not None else get_candidate_profile()
-    missing = [
-        env_name
-        for profile_key, env_name in profile_env_vars.items()
-        if not profile.get(profile_key, "").strip()
-        or "<" in profile.get(profile_key, "")
-        or ">" in profile.get(profile_key, "")
-    ]
-    if missing:
-        variables = ", ".join(missing)
-        raise ValueError(
-            f"Candidate profile is incomplete. Set {variables} in .env "
-            "(copy .env.example to .env) or export them in your environment."
-        )
-
-    if profile["sponsorship_needed"].strip().lower() not in {"yes", "no"}:
-        raise ValueError(
-            "CANDIDATE_SPONSORSHIP_NEEDED must be Yes or No. "
-            "Configure it in .env (copy .env.example to .env) or your environment."
-        )
-
-    return profile
-
-
-def split_csv_env(name, fallback=""):
-    raw_value = os.getenv(name, fallback)
-    return [item.strip() for item in raw_value.split(",") if item.strip()]
-
-
-def get_preferred_role_keywords():
-    return split_csv_env(
-        "PREFERRED_ROLE_KEYWORDS",
-        "snowflake,data engineer,database administrator,data platform,cloud data operations,sql server",
-    )
-
-
-def get_preferred_location_keywords(candidate_profile):
-    return split_csv_env(
-        "PREFERRED_LOCATION_KEYWORDS",
-        f"{candidate_profile['location']},Dallas,Texas,Remote,Hybrid",
-    )
-
-
-def normalize_text(value):
-    return re.sub(r"\s+", " ", value.lower()).strip()
-
-
-def count_keyword_hits(text, keywords):
-    normalized = normalize_text(text)
-    hits = []
-    for keyword in keywords:
-        lowered = normalize_text(keyword)
-        if lowered and lowered in normalized:
-            hits.append(keyword)
-    return hits
-
-
-def extract_resume_keywords(resume_text):
-    candidate_terms = re.findall(r"[a-zA-Z][a-zA-Z0-9\+#\.\-/]{2,}", resume_text.lower())
-    stopwords = {
-        "with", "from", "that", "this", "have", "your", "will", "team", "role", "years", "using",
-        "into", "such", "than", "their", "about", "work", "data", "engineer", "manager", "senior",
-    }
-    ranked_terms = []
-    seen = set()
-    for term in candidate_terms:
-        if term in stopwords or term in seen:
-            continue
-        seen.add(term)
-        ranked_terms.append(term)
-        if len(ranked_terms) >= 40:
-            break
-    return ranked_terms
-
-
-def score_job_context(job_context, resume_text, candidate_profile):
-    combined_text = "\n".join(
-        [job_context["page_title"], job_context["job_title"], job_context["description"], job_context["page_text"][:3000]]
-    )
-    score = 0
-    reasons = []
-
-    role_hits = count_keyword_hits(combined_text, get_preferred_role_keywords())
-    if role_hits:
-        score += 25 * len(role_hits)
-        reasons.append(f"role matches: {', '.join(role_hits[:4])}")
-
-    location_hits = count_keyword_hits(combined_text, get_preferred_location_keywords(candidate_profile))
-    if location_hits:
-        score += 12 * len(location_hits)
-        reasons.append(f"location matches: {', '.join(location_hits[:3])}")
-
-    resume_hits = count_keyword_hits(combined_text, extract_resume_keywords(resume_text))
-    if resume_hits:
-        score += min(len(resume_hits), 10) * 4
-        reasons.append(f"resume overlap: {', '.join(resume_hits[:5])}")
-
-    eligibility_markers = (
-        "green card",
-        "u.s. citizens",
-        "citizens only",
-        "no sponsorship",
-        "no opt",
-    )
-    eligibility_hits = count_keyword_hits(combined_text, list(eligibility_markers))
-    if candidate_profile["sponsorship_needed"].strip().lower() == "no" and eligibility_hits:
-        score += 10
-        reasons.append("eligibility aligned")
-
-    if job_context.get("verified"):
-        score += 30
-        reasons.append(f"verified via {job_context.get('verification_source')}")
-
-    return score, reasons
-
-
-def extract_priority_job_keywords(job_context):
-    combined_text = "\n".join(
-        [job_context.get("job_title", ""), job_context.get("description", ""), job_context.get("page_text", "")[:4000]]
-    ).lower()
-    candidate_terms = re.findall(r"[a-zA-Z][a-zA-Z0-9\+#\./-]{2,}", combined_text)
-    stopwords = {
-        "with", "from", "that", "this", "have", "your", "will", "team", "role", "years", "using",
-        "into", "such", "than", "their", "about", "work", "data", "engineer", "manager", "senior",
-        "experience", "required", "preferred", "strong", "including", "support", "design", "build",
-    }
-    keywords = []
-    seen = set()
-    for term in candidate_terms:
-        if term in stopwords or term in seen:
-            continue
-        seen.add(term)
-        keywords.append(term)
-        if len(keywords) >= 60:
-            break
-    return keywords
-
-
-def analyze_resume_gaps(job_context, resume_text, candidate_profile):
-    job_keywords = extract_priority_job_keywords(job_context)
-    resume_keywords = set(extract_resume_keywords(resume_text))
-    preferred_roles = [normalize_text(item) for item in get_preferred_role_keywords()]
-
-    matched_keywords = [keyword for keyword in job_keywords if normalize_text(keyword) in resume_keywords][:15]
-    missing_keywords = [keyword for keyword in job_keywords if normalize_text(keyword) not in resume_keywords][:15]
-    role_matches = [keyword for keyword in preferred_roles if keyword and keyword in normalize_text(job_context.get("page_text", ""))]
-
-    readiness = "strong"
-    if len(missing_keywords) >= 10:
-        readiness = "medium"
-    if len(missing_keywords) >= 14:
-        readiness = "stretch"
-
-    return {
-        "readiness": readiness,
-        "matched_keywords": matched_keywords,
-        "missing_keywords": missing_keywords,
-        "role_matches": role_matches,
-        "candidate_location": candidate_profile.get("location"),
-    }
-
-
-def render_gap_analysis_markdown(job_context, gap_analysis):
-    matched = ", ".join(gap_analysis["matched_keywords"][:10]) or "No strong overlap detected"
-    missing = ", ".join(gap_analysis["missing_keywords"][:10]) or "No major missing keywords detected"
-    role_matches = ", ".join(gap_analysis["role_matches"][:6]) or "No preferred-role keyword matches recorded"
-    return (
-        "# Resume Gap Analysis\n\n"
-        f"## Role\n- Company: {job_context['company_name']}\n- Title: {job_context['job_title']}\n- Readiness: {gap_analysis['readiness']}\n\n"
-        f"## Current Matches\n- {matched}\n\n"
-        f"## Likely Gaps To Prepare\n- {missing}\n\n"
-        f"## Role Alignment Signals\n- {role_matches}\n"
-    )
-
-
-def render_follow_up_markdown(job_context, candidate_profile):
-    recruiter_message = (
-        f"Hi, I recently applied for the {job_context['job_title']} role at {job_context['company_name']}. "
-        "My background includes Snowflake, SQL, ETL, and production data-platform support, and I would welcome the chance "
-        "to discuss how I can contribute. Thank you for your time."
-    )
-    email_message = (
-        f"Subject: Application Follow-Up - {job_context['job_title']}\n\n"
-        f"Hello {job_context['company_name']} team,\n\n"
-        f"I applied for the {job_context['job_title']} position and wanted to follow up with continued interest. "
-        f"I bring experience in database and data-platform engineering, including Snowflake, SQL, ETL, automation, and production support. "
-        "If helpful, I would be glad to discuss my background further.\n\n"
-        f"Best regards,\n{candidate_profile['first_name']} {candidate_profile['last_name']}\n{candidate_profile['email']}\n{candidate_profile['phone']}"
-    )
-    return (
-        "# Recruiter Follow-Up Pack\n\n"
-        "## LinkedIn Message\n"
-        f"{recruiter_message}\n\n"
-        "## Email Follow-Up\n"
-        f"```text\n{email_message}\n```\n"
-    )
-
-
-def get_search_result_limit():
-    configured = os.getenv("JOB_SEARCH_RESULT_LIMIT", "25").strip() or "25"
-    try:
-        limit = int(configured)
-    except ValueError as exc:
-        raise ValueError(f"JOB_SEARCH_RESULT_LIMIT must be an integer. Got: {configured}") from exc
-
-    if limit <= 0:
-        raise ValueError("JOB_SEARCH_RESULT_LIMIT must be greater than zero.")
-
-    return limit
-
-
-def build_linkedin_search_url(search_query, search_location, start=0):
-    keyword_value = quote_plus(search_query.strip())
-    location_value = quote_plus(search_location.strip()) if search_location.strip() else ""
-    url = f"https://www.linkedin.com/jobs/search/?keywords={keyword_value}"
-    if location_value:
-        url += f"&location={location_value}"
-    if start > 0:
-        url += f"&start={start}"
-    return url
-
-
-def build_linkedin_guest_search_url(search_query, search_location, start=0):
-    keyword_value = quote_plus(search_query.strip())
-    location_value = quote_plus(search_location.strip()) if search_location.strip() else ""
-    url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={keyword_value}"
-    if location_value:
-        url += f"&location={location_value}"
-    if start > 0:
-        url += f"&start={start}"
-    return url
-
-
-def extract_job_urls_from_search_html(html_text):
-    matches = re.findall(
-        r'https://www\.linkedin\.com/jobs/view/[^\"\'\s?]+|/jobs/view/[^\"\'\s?]+',
-        html_text,
-        flags=re.IGNORECASE,
-    )
-    discovered = []
-    seen = set()
-    for match in matches:
-        normalized = match if match.startswith("http") else f"https://www.linkedin.com{match}"
-        normalized = normalized.split("?", 1)[0]
-        if normalized not in seen:
-            discovered.append(normalized)
-            seen.add(normalized)
-    return discovered
-
-
-def discover_linkedin_job_urls(search_query, search_location, max_results):
-    discovered = []
-    seen = set()
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    page_size = 25
-    for start in range(0, max_results, page_size):
-        search_url = build_linkedin_guest_search_url(search_query, search_location, start=start)
-        response = requests.get(search_url, headers=headers, timeout=30)
-        response.raise_for_status()
-
-        page_urls = extract_job_urls_from_search_html(response.text)
-        if not page_urls:
-            break
-
-        new_on_page = 0
-        for url in page_urls:
-            if url in seen:
-                continue
-            discovered.append(url)
-            seen.add(url)
-            new_on_page += 1
-            if len(discovered) >= max_results:
-                return discovered
-
-        if new_on_page == 0:
-            break
-
-    return discovered
-
-
-def discover_job_urls(search_query, search_location, portal=None, max_results=None):
-    portal_name = (portal or os.getenv("JOB_SEARCH_PORTAL", "linkedin")).strip().lower()
-    if portal_name not in SUPPORTED_SEARCH_PORTALS:
-        supported = ", ".join(sorted(SUPPORTED_SEARCH_PORTALS))
-        raise ValueError(f"Unsupported job search portal '{portal_name}'. Supported values: {supported}")
-
-    if not search_query or not search_query.strip():
-        raise ValueError("Job search query is required for automatic discovery.")
-
-    result_limit = max_results or get_search_result_limit()
-    if portal_name == "linkedin":
-        job_urls = discover_linkedin_job_urls(search_query, search_location or "", result_limit)
-    else:
-        job_urls = []
-
-    if not job_urls:
-        location_text = f" in {search_location}" if search_location else ""
-        raise ValueError(f"No job postings were discovered for '{search_query}'{location_text} on {portal_name}.")
-
-    return job_urls
-
-
 def rank_job_urls(job_urls, resume_path, candidate_profile):
     resume_text = extract_resume_text(Path(resume_path).expanduser())
     ranked_jobs = []
@@ -762,16 +381,6 @@ def rank_job_urls(job_urls, resume_path, candidate_profile):
 
     ranked_jobs.sort(key=lambda item: (item["eligible"], item["score"]), reverse=True)
     return ranked_jobs
-
-
-def print_ranked_job_summary(ranked_jobs, selection_count):
-    print(f"[*] Ranked {len(ranked_jobs)} jobs. Selecting top {selection_count} verified postings.")
-    for index, item in enumerate(ranked_jobs[:selection_count], start=1):
-        context = item["job_context"]
-        reason_text = "; ".join(item["reasons"][:3]) if item["reasons"] else "no scoring reasons"
-        print(
-            f"[{index}] score={item['score']} | {context.get('company_name')} | {context.get('job_title')} | {reason_text}"
-        )
 
 
 def validate_ollama_runtime(model):
