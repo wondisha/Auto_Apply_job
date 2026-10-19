@@ -79,9 +79,12 @@ pip install weasyprint
 ## Configure
 
 1. Copy `.env.example` to `.env`.
-2. Set your real API keys and local paths.
-3. Add trusted employers to `VERIFIED_COMPANY_ALLOWLIST` when guest pages do not expose a verification marker.
-4. Put your real resume PDF in the working directory or point `RESUME_PATH` to it.
+2. Replace every `<...>` candidate profile placeholder with your own values: `CANDIDATE_FIRST_NAME`, `CANDIDATE_LAST_NAME`, `CANDIDATE_EMAIL`, `CANDIDATE_PHONE`, `CANDIDATE_LINKEDIN_URL`, `CANDIDATE_GITHUB_URL`, `CANDIDATE_LOCATION`, and `CANDIDATE_SPONSORSHIP_NEEDED` (`Yes` or `No`).
+3. Set your real API keys and local paths.
+4. Add trusted employers to `VERIFIED_COMPANY_ALLOWLIST` when guest pages do not expose a verification marker.
+5. Put your real resume PDF in the working directory or point `RESUME_PATH` to it.
+
+The candidate profile is loaded from these environment variables (or the local `.env` file) and is shown in the Streamlit **Candidate Profile Snapshot**. All eight fields must be configured before running preflight, generating documents, or applying. Missing fields are reported by variable name; values are not included in configuration errors. Do not commit `.env` or share it, since it contains personal information.
 
 ## Typical commands
 
