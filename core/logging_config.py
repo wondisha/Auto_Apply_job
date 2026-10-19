@@ -18,6 +18,10 @@ SENSITIVE_KEY_MARKERS = (
     "secret",
     "token",
     "password",
+    "authorization",
+    "jwt",
+    "credential",
+    "cookie",
     "linkedin_url",
     "github_url",
 )
@@ -25,6 +29,8 @@ SENSITIVE_KEY_MARKERS = (
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"(?<![\w/])(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?!\w)")
 _API_KEY_RE = re.compile(r"\b(?:AIza[0-9A-Za-z_-]{20,}|sk-[0-9A-Za-z_-]{16,})\b")
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*")
 _HOME_PATH_RE = re.compile(r"(?:/home/|/Users/|[A-Za-z]:\\Users\\)[^/\\\s]+")
 
 
@@ -42,6 +48,8 @@ def redact_text(text):
     if text is None:
         return text
     text = str(text)
+    text = _BEARER_RE.sub(REDACTED, text)
+    text = _JWT_RE.sub(REDACTED, text)
     text = _API_KEY_RE.sub(REDACTED, text)
     text = _EMAIL_RE.sub(REDACTED, text)
     text = _PHONE_RE.sub(REDACTED, text)

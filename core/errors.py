@@ -54,6 +54,20 @@ class PersistenceError(AutoApplyError, OSError):
     category = "persistence"
 
 
+class AuthenticationError(AutoApplyError):
+    """Missing, malformed, expired, or otherwise invalid credentials (HTTP 401)."""
+
+    exit_code = 8
+    category = "authentication"
+
+
+class AuthorizationError(AutoApplyError):
+    """Authenticated caller lacks the role/permission or ownership required (HTTP 403)."""
+
+    exit_code = 9
+    category = "authorization"
+
+
 def describe_error(exc):
     """Return a consistent user-facing message for a domain error."""
     category = getattr(exc, "category", "error")

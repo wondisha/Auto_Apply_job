@@ -1,14 +1,15 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from apply_agent import load_job_urls, preview_ranked_jobs
 from ..models import ApplyRequest, JobDiscoveryRequest
+from ..security import UserContext, require_permission
 
 
 router = APIRouter()
 
 
 @router.post("/discover")
-def discover_jobs(payload: JobDiscoveryRequest):
+def discover_jobs(payload: JobDiscoveryRequest, user: UserContext = Depends(require_permission("jobs:discover"))):
     try:
         urls = load_job_urls(
             None,
@@ -24,7 +25,7 @@ def discover_jobs(payload: JobDiscoveryRequest):
 
 
 @router.post("/preview")
-def preview_jobs(payload: JobDiscoveryRequest):
+def preview_jobs(payload: JobDiscoveryRequest, user: UserContext = Depends(require_permission("jobs:discover"))):
     try:
         urls = load_job_urls(
             None,
@@ -41,7 +42,7 @@ def preview_jobs(payload: JobDiscoveryRequest):
 
 
 @router.post("/apply")
-def apply_job(payload: ApplyRequest):
+def apply_job(payload: ApplyRequest, user: UserContext = Depends(require_permission("jobs:discover"))):
     return {
         "message": "Use the CLI or Streamlit run controls for live application runs. This endpoint is a future handoff point for background jobs.",
         "job_url": payload.job_url,
