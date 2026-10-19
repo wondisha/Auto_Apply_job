@@ -1,6 +1,9 @@
 import re
 
 from core.config import get_preferred_location_keywords, get_preferred_role_keywords
+from core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def normalize_text(value):
@@ -159,7 +162,7 @@ def render_follow_up_markdown(job_context, candidate_profile):
 
 
 def print_ranked_job_summary(ranked_jobs, selection_count):
-    print(f"[*] Ranked {len(ranked_jobs)} jobs. Selecting top {selection_count} verified postings.")
+    logger.info("Ranked %s jobs. Selecting top %s verified postings.", len(ranked_jobs), selection_count)
     for index, item in enumerate(ranked_jobs[:selection_count], start=1):
         context = item["job_context"]
         reason_text = "; ".join(item["reasons"][:3]) if item["reasons"] else "no scoring reasons"

@@ -188,6 +188,27 @@ For automatic discovery, you can also tune:
 - `JOB_SEARCH_PORTAL` which currently supports `linkedin`
 - `JOB_SEARCH_RESULT_LIMIT` to cap how many public search results are screened before ranking
 
+## Logging and troubleshooting
+
+Logs are written to stderr through a central logger (`core/logging_config.py`) as key/value lines (`ts=... level=... module=... msg="..."`).
+
+- `LOG_LEVEL` sets verbosity: `DEBUG`, `INFO` (default), `WARNING`, `ERROR`. Invalid values fall back to `INFO`.
+- `LOG_FORMAT=json` switches to JSON lines.
+- Emails, phone numbers, API keys, and home-directory paths are redacted from log output. The full candidate profile and environment are never logged.
+
+Errors are grouped into categories (`core/errors.py`). The CLI prints `<Category> error: <message>` and exits with a mapped code:
+
+| Category | Meaning | Exit code |
+| --- | --- | --- |
+| Configuration | Missing/invalid env settings, files, or inputs | 1 |
+| Discovery | Job search failed or returned nothing | 3 |
+| Verification | Company/job verification failed | 4 |
+| Document generation | Tailored documents could not be produced | 5 |
+| Application run | Browser/LLM application run failed | 6 |
+| Persistence | Local history/state could not be read or written | 7 |
+
+Troubleshooting: re-run with `LOG_LEVEL=DEBUG` and look for `level=ERROR`/`level=WARNING` lines; the `module=` field shows which component reported them.
+
 ## Running tests
 
 The test suite covers `core/config.py`, `core/profile.py`, `core/discovery.py`, and `core/ranking.py`. It makes no network, browser, or LLM calls.

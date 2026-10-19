@@ -1,5 +1,7 @@
 import os
 
+from core.errors import ConfigurationError
+
 
 def get_fallback_provider_name():
     return os.getenv("FALLBACK_LLM_PROVIDER", os.getenv("FALLBACK_PROVIDER", "google")).strip().lower()
@@ -10,10 +12,10 @@ def get_agent_llm_timeout_seconds():
     try:
         timeout = int(configured)
     except ValueError as exc:
-        raise ValueError(f"AGENT_LLM_TIMEOUT must be an integer. Got: {configured}") from exc
+        raise ConfigurationError(f"AGENT_LLM_TIMEOUT must be an integer. Got: {configured}") from exc
 
     if timeout <= 0:
-        raise ValueError("AGENT_LLM_TIMEOUT must be greater than zero.")
+        raise ConfigurationError("AGENT_LLM_TIMEOUT must be greater than zero.")
 
     return timeout
 
@@ -23,10 +25,10 @@ def get_agent_step_timeout_seconds():
     try:
         timeout = int(configured)
     except ValueError as exc:
-        raise ValueError(f"AGENT_STEP_TIMEOUT must be an integer. Got: {configured}") from exc
+        raise ConfigurationError(f"AGENT_STEP_TIMEOUT must be an integer. Got: {configured}") from exc
 
     if timeout <= 0:
-        raise ValueError("AGENT_STEP_TIMEOUT must be greater than zero.")
+        raise ConfigurationError("AGENT_STEP_TIMEOUT must be greater than zero.")
 
     return timeout
 
@@ -56,10 +58,10 @@ def get_daily_application_target():
     try:
         target = int(configured)
     except ValueError as exc:
-        raise ValueError(f"DAILY_APPLICATION_TARGET must be an integer. Got: {configured}") from exc
+        raise ConfigurationError(f"DAILY_APPLICATION_TARGET must be an integer. Got: {configured}") from exc
 
     if target <= 0:
-        raise ValueError("DAILY_APPLICATION_TARGET must be greater than zero.")
+        raise ConfigurationError("DAILY_APPLICATION_TARGET must be greater than zero.")
 
     return target
 
@@ -97,9 +99,9 @@ def get_search_result_limit():
     try:
         limit = int(configured)
     except ValueError as exc:
-        raise ValueError(f"JOB_SEARCH_RESULT_LIMIT must be an integer. Got: {configured}") from exc
+        raise ConfigurationError(f"JOB_SEARCH_RESULT_LIMIT must be an integer. Got: {configured}") from exc
 
     if limit <= 0:
-        raise ValueError("JOB_SEARCH_RESULT_LIMIT must be greater than zero.")
+        raise ConfigurationError("JOB_SEARCH_RESULT_LIMIT must be greater than zero.")
 
     return limit

@@ -1,5 +1,7 @@
 import os
 
+from core.errors import ConfigurationError
+
 PROFILE_ENV_VARS = {
     "first_name": "CANDIDATE_FIRST_NAME",
     "last_name": "CANDIDATE_LAST_NAME",
@@ -27,13 +29,13 @@ def validate_candidate_profile(candidate_profile=None):
     ]
     if missing:
         variables = ", ".join(missing)
-        raise ValueError(
+        raise ConfigurationError(
             f"Candidate profile is incomplete. Set {variables} in .env "
             "(copy .env.example to .env) or export them in your environment."
         )
 
     if profile["sponsorship_needed"].strip().lower() not in {"yes", "no"}:
-        raise ValueError(
+        raise ConfigurationError(
             "CANDIDATE_SPONSORSHIP_NEEDED must be Yes or No. "
             "Configure it in .env (copy .env.example to .env) or your environment."
         )
