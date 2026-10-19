@@ -54,6 +54,7 @@ logger = get_logger(__name__)
 
 STATUS_FILE = Path(__file__).with_name(".agent_status.json")
 APPLICATION_LOG_FILE = Path(__file__).with_name(".application_history.json")
+DEFAULT_USER_ID = "local"
 APPLICATION_DB_FILE = Path(__file__).with_name(".application_data.sqlite3")
 QUESTION_MEMORY_FILE = Path(__file__).with_name(".question_memory.json")
 ARTIFACTS_ROOT = Path(__file__).with_name("artifacts")
@@ -250,10 +251,14 @@ def initialize_application_store():
                 score INTEGER,
                 source TEXT,
                 artifacts_json TEXT NOT NULL,
-                gap_analysis_json TEXT
+                gap_analysis_json TEXT,
+                user_id TEXT NOT NULL DEFAULT 'local'
             )
             """
         )
+        existing_columns = {row["name"] for row in connection.execute("PRAGMA table_info(applications)")}
+        if "user_id" not in existing_columns:
+            connection.execute("ALTER TABLE applications ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local'")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS question_memory (
@@ -756,7 +761,7 @@ def load_application_history():
     return read_json_file(APPLICATION_LOG_FILE, {"applications": []})
 
 
-def record_application_event(job_context, status, reason=None, artifacts=None):
+def record_application_event(job_context, status, reason=None, artifacts=None, user_id=DEFAULT_USER_ID):
     initialize_application_store()
     history = load_application_history()
     event = {
@@ -778,8 +783,8 @@ def record_application_event(job_context, status, reason=None, artifacts=None):
             """
             INSERT INTO applications (
                 timestamp, status, reason, url, company_name, job_title, verified, verification_source,
-                score, source, artifacts_json, gap_analysis_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                score, source, artifacts_json, gap_analysis_json, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event["timestamp"],
@@ -794,6 +799,7 @@ def record_application_event(job_context, status, reason=None, artifacts=None):
                 job_context.get("source", "runtime"),
                 json.dumps(event["artifacts"]),
                 json.dumps((artifacts or {}).get("gap_analysis")) if (artifacts or {}).get("gap_analysis") else None,
+                user_id,
             ),
         )
 
@@ -808,18 +814,21 @@ def count_successful_applications_today():
     )
 
 
-def list_recent_application_events(limit=100):
+def list_recent_application_events(limit=100, user_id=None):
+    """List recent events; when ``user_id`` is given only that user's rows are returned."""
     initialize_application_store()
+    where, params = ("WHERE user_id = ?", [user_id]) if user_id is not None else ("", [])
     with get_db_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             SELECT timestamp, status, reason, url, company_name, job_title, verified,
                    verification_source, score, source, artifacts_json, gap_analysis_json
             FROM applications
+            {where}
             ORDER BY timestamp DESC
             LIMIT ?
             """,
-            (limit,),
+            (*params, limit),
         ).fetchall()
 
     events = []
