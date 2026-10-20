@@ -1,4 +1,4 @@
-# Auto Apply Job
+#  Auto Apply Job
 
 Automates job-application prep and browser submission with local fallback LLM support.
 
