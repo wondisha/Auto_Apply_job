@@ -1,3 +1,4 @@
 # One job URL per line
-https://www.linkedin.com/jobs/view/4428723824/
-https://www.linkedin.com/jobs/view/1234567890/
+https://www.linkedin.com/jobs/
+https://www.linkedin.com/jobs/
+https://www.glassdoor.co.uk/Job/
